@@ -1,0 +1,451 @@
+// src/shell.c - Shell implementation
+#include "../include/shell.h"
+#include "../include/vga.h"
+#include "../include/memory.h"
+#include "../include/interrupt.h"
+#include "../include/string.h"
+#include "../include/text.h"
+#include "../include/fs.h" // NEW: Include File System
+
+// Directory system: The 'current_directory' integer is now obsolete,
+// replaced by the global fs_current_dir from fs.h
+
+// History storage (dynamic)
+static char** history = 0;
+static int history_count = 0;
+static int history_capacity = 0;
+static char last_result[MAX_RESULT_LEN] = "";
+static int has_result = 0;
+
+// Constants
+static const char* current_user = "root";
+static const char* kernel_name = "punix-v1.03";
+
+// Helper: Read line with visual feedback
+static void read_line_with_display(char* buffer, int max_len) {
+    int i = 0;
+
+    while (i < max_len - 1) {
+        char c = keyboard_read();
+
+        if (c == '\n') {
+            buffer[i] = '\0';
+            vga_putchar('\n', COLOR_WHITE_ON_BLACK);
+            break;
+        } else if (c == '\b') {
+            if (i > 0) {
+                i--;
+                vga_putchar('\b', COLOR_WHITE_ON_BLACK);
+                vga_putchar(' ', COLOR_WHITE_ON_BLACK); // Clear char
+                vga_putchar('\b', COLOR_WHITE_ON_BLACK); // Move cursor back
+            }
+        } else if ((c >= ' ' && c <= '~')) {
+            buffer[i++] = c;
+            vga_putchar(c, COLOR_WHITE_ON_BLACK);
+        }
+    }
+
+    buffer[i] = '\0';
+}
+
+/**
+ * @brief Constructs and displays the full path of the current directory.
+ */
+static void show_prompt() {
+    vga_print_colored(current_user, COLOR_GREEN_ON_BLACK);
+    vga_print_colored("@", COLOR_WHITE_ON_BLACK);
+    vga_print_colored(kernel_name, COLOR_GREEN_ON_BLACK);
+    vga_print_colored(":", COLOR_WHITE_ON_BLACK);
+
+    // --- VFS PATH DISPLAY ---
+    if (fs_current_dir == fs_root) {
+        vga_print_colored("/", COLOR_YELLOW_ON_BLACK);
+    } else {
+        // Simple display: use "~" for /a and full path for others
+        if (strcmp(fs_current_dir->name, "a") == 0 && fs_current_dir->parent == fs_root) {
+             vga_print_colored("~", COLOR_YELLOW_ON_BLACK); // Common UNIX home dir alias
+        } else {
+            // Basic path display (just the current node name)
+            vga_print_colored("/", COLOR_YELLOW_ON_BLACK);
+            vga_print_colored(fs_current_dir->name, COLOR_YELLOW_ON_BLACK);
+        }
+    }
+    // --- END VFS PATH DISPLAY ---
+
+    vga_print_colored("# ", COLOR_WHITE_ON_BLACK);
+}
+
+void shell_init() {
+    vga_print_colored("+================================================+\n", COLOR_GREEN_ON_BLACK);
+    vga_print_colored("|           SIMPLE KERNEL - CALCULATOR           |\n", COLOR_GREEN_ON_BLACK);
+    vga_print_colored("+================================================+\n", COLOR_GREEN_ON_BLACK);
+    vga_print("\n");
+}
+
+// Command implementations
+
+/**
+ * @brief Prints the full working directory path (simplified VFS implementation).
+ */
+void cmd_pwd() {
+    // NOTE: For a complex VFS, this would involve recursive path traversal.
+    // Here, we handle the root and its direct children.
+    if (fs_current_dir == fs_root) {
+        vga_print_colored("/\n", COLOR_GREEN_ON_BLACK);
+    } else {
+        vga_print_colored("/", COLOR_GREEN_ON_BLACK);
+        vga_print_colored(fs_current_dir->name, COLOR_GREEN_ON_BLACK);
+        vga_print_colored("\n", COLOR_GREEN_ON_BLACK);
+    }
+}
+
+/**
+ * @brief Lists the contents of the current directory (or history if in /h).
+ */
+void cmd_ls() {
+    // Check if we are in the special history directory (/h)
+    if (strcmp(fs_current_dir->name, "h") == 0 && fs_current_dir->parent == fs_root) {
+        history_show();
+        return;
+    }
+
+    // List contents of a regular directory node
+    if (fs_current_dir->num_children == 0) {
+        vga_print_colored("Directory is empty.\n", COLOR_YELLOW_ON_BLACK);
+        return;
+    }
+
+    vga_print_colored("Contents of /", COLOR_YELLOW_ON_BLACK);
+    vga_print_colored(fs_current_dir->name, COLOR_YELLOW_ON_BLACK);
+    vga_print_colored(":\n", COLOR_YELLOW_ON_BLACK);
+
+    for (int i = 0; i < fs_current_dir->num_children; i++) {
+        fs_node_t* child = fs_current_dir->children[i];
+
+        if (child->type == FS_DIRECTORY) {
+            vga_print_colored(child->name, COLOR_YELLOW_ON_BLACK);
+            vga_print_colored("/", COLOR_YELLOW_ON_BLACK);
+        } else { // FS_FILE
+            vga_print_colored(child->name, COLOR_WHITE_ON_BLACK);
+            vga_print(" (");
+            char size_str[12];
+            int_to_str((int)child->size, size_str);
+            vga_print(size_str);
+            vga_print(" bytes)");
+        }
+        vga_print("\n");
+    }
+}
+
+/**
+ * @brief Changes the current working directory using VFS.
+ */
+void cmd_cd(char* dir) {
+    if (fs_change_dir(dir) == 0) {
+        vga_print_colored("Changed directory to ", COLOR_GREEN_ON_BLACK);
+
+        // Print the path after change
+        if (fs_current_dir == fs_root) {
+            vga_print_colored("/", COLOR_YELLOW_ON_BLACK);
+        } else {
+            vga_print_colored(fs_current_dir->name, COLOR_YELLOW_ON_BLACK);
+        }
+        vga_print_colored("\n", COLOR_GREEN_ON_BLACK);
+    } else {
+        vga_print_colored("cd: no such directory or not a directory\n", COLOR_YELLOW_ON_BLACK);
+    }
+}
+
+void cmd_add() {
+    // Original logic required directory == 1 (/a)
+    if (fs_current_dir->parent != fs_root || strcmp(fs_current_dir->name, "a") != 0) {
+        vga_print_colored("Mount /a for executing this command\n", COLOR_YELLOW_ON_BLACK);
+        return;
+    }
+
+    char input[40];
+
+    vga_print_colored("Enter first number: ", COLOR_YELLOW_ON_BLACK);
+    read_line_with_display(input, 40);
+    int num1 = str_to_int(input);
+
+    vga_print_colored("Enter second number: ", COLOR_YELLOW_ON_BLACK);
+    read_line_with_display(input, 40);
+    int num2 = str_to_int(input);
+
+    int sum = num1 + num2;
+
+    last_result[0] = '\0';
+    char temp[12];
+
+    int_to_str(num1, temp);
+    strcpy(last_result, temp);
+    strcpy(last_result + strlen(last_result), " + ");
+
+    int_to_str(num2, temp);
+    strcpy(last_result + strlen(last_result), temp);
+    strcpy(last_result + strlen(last_result), " = ");
+
+    int_to_str(sum, temp);
+    strcpy(last_result + strlen(last_result), temp);
+
+    has_result = 1;
+
+    vga_print(last_result);
+    vga_print("\n");
+}
+
+void cmd_mem() {
+    vga_print_colored("=== Memory Statistics ===\n", COLOR_GREEN_ON_BLACK);
+
+    uint32_t total, used, free;
+    pmm_get_stats(&total, &used, &free);
+
+    uint32_t total_kb = (total * PAGE_SIZE) / 1024;
+    uint32_t used_kb = (used * PAGE_SIZE) / 1024;
+    uint32_t free_kb = (free * PAGE_SIZE) / 1024;
+
+    vga_print("Total physical: ");
+    char num[16];
+    int_to_str(total_kb, num);
+    vga_print(num);
+    vga_print(" KB\n");
+
+    vga_print("Used physical:  ");
+    int_to_str(used_kb, num);
+    vga_print(num);
+    vga_print(" KB\n");
+
+    vga_print("Free physical:  ");
+    int_to_str(free_kb, num);
+    vga_print(num);
+    vga_print(" KB\n");
+
+    uint32_t percent_used = total > 0 ? (used * 100) / total : 0;
+    vga_print("Usage: ");
+    int_to_str(percent_used, num);
+    vga_print(num);
+    vga_print("%\n");
+}
+
+void cmd_help() {
+    vga_clear_screen();
+    vga_print_colored("+================================================+\n", COLOR_GREEN_ON_BLACK);
+    vga_print_colored("|    CALCULATOR KERNEL - Command Reference       |\n", COLOR_GREEN_ON_BLACK);
+    vga_print_colored("+================================================+\n", COLOR_GREEN_ON_BLACK);
+    vga_print("\n");
+
+    // The help menu is now simplified based on the VFS structure
+    vga_print_colored("Filesystem & Global Commands:\n", COLOR_YELLOW_ON_BLACK);
+    vga_print("  ls           - List contents of current directory\n");
+    vga_print("  cd [dir]     - Change directory (e.g., /a, /h, ..)\n");
+    vga_print("  pwd          - Print working directory\n");
+    vga_print("  text [file]  - Use simple text editor (creates/edits file)\n");
+    vga_print("  mem          - Show memory statistics\n");
+    vga_print("  clear        - Clear screen\n");
+    vga_print("  exit         - Quit (shutdown)\n");
+    vga_print("  help         - Show this help\n");
+
+    vga_print("\n");
+
+    vga_print_colored("Kernel-Specific Commands (Requires /a):\n", COLOR_YELLOW_ON_BLACK);
+    vga_print("  add          - Add two numbers\n");
+    vga_print("  s            - Save last calculation result to history (/h)\n");
+
+    vga_print("\n");
+
+    vga_print_colored("History Commands (Requires /h):\n", COLOR_YELLOW_ON_BLACK);
+    vga_print("  del [n]      - Delete history entry number n\n");
+
+
+    vga_print("\nPress any key to continue...");
+    keyboard_read();
+    vga_clear_screen();
+    shell_init();
+}
+
+void cmd_clear() {
+    vga_clear_screen();
+    shell_init();
+}
+
+void cmd_exit() {
+    vga_clear_screen();
+    vga_print_colored("+================================================+\n", COLOR_GREEN_ON_BLACK);
+    vga_print_colored("|              SHUTTING DOWN...                  |\n", COLOR_GREEN_ON_BLACK);
+    vga_print_colored("+================================================+\n", COLOR_GREEN_ON_BLACK);
+    vga_print("\n");
+    vga_print("Thank you for using Calculator Kernel!\n");
+    vga_print("Goodbye!\n\n");
+    vga_print("It is now safe to close this window.\n");
+
+    // QEMU shutdown
+    __asm__ volatile("outb %0, %1" : : "a"((uint8_t)0x00), "Nd"((uint16_t)0x604));
+    __asm__ volatile("outb %0, %1" : : "a"((uint8_t)0x20), "Nd"((uint16_t)0x605));
+
+    __asm__ volatile("cli; hlt");
+    while(1) __asm__ volatile("hlt");
+}
+
+// History functions (History storage remains external to VFS, but accessed via /h)
+void history_save() {
+    // Original logic required directory == 1 (/a)
+    if (fs_current_dir->parent != fs_root || strcmp(fs_current_dir->name, "a") != 0) {
+        vga_print_colored("Command 's' requires the current directory to be /a.\n", COLOR_YELLOW_ON_BLACK);
+        return;
+    }
+
+    if (!has_result) {
+        vga_print_colored("Nothing to save!\n", COLOR_YELLOW_ON_BLACK);
+        return;
+    }
+
+    if (history_count >= history_capacity) {
+        int new_capacity = history_capacity == 0 ? 10 : history_capacity * 2;
+        if (new_capacity > MAX_HISTORY) new_capacity = MAX_HISTORY;
+
+        char** new_history = (char**)kmalloc(new_capacity * sizeof(char*));
+        if (!new_history) {
+             vga_print_colored("Failed to allocate memory for history growth.\n", COLOR_YELLOW_ON_BLACK);
+             return;
+        }
+
+        for (int i = 0; i < history_count; i++) {
+            new_history[i] = history[i];
+        }
+
+        if (history) {
+            kfree(history);
+        }
+
+        history = new_history;
+        history_capacity = new_capacity;
+    }
+
+    if (history_count < MAX_HISTORY) {
+        int len = strlen(last_result);
+        history[history_count] = (char*)kmalloc(len + 1);
+        if (history[history_count]) {
+            strcpy(history[history_count], last_result);
+            history_count++;
+            vga_print_colored("Saved to history! (File system abstraction used)\n", COLOR_GREEN_ON_BLACK);
+        } else {
+             vga_print_colored("Failed to allocate memory for history entry.\n", COLOR_YELLOW_ON_BLACK);
+        }
+    } else {
+        vga_print_colored("History full! (max 50 entries)\n", COLOR_YELLOW_ON_BLACK);
+    }
+}
+
+void history_delete(int index) {
+    if (strcmp(fs_current_dir->name, "h") != 0 || fs_current_dir->parent != fs_root) {
+        vga_print_colored("Command 'del' is only available in the /h directory.\n", COLOR_YELLOW_ON_BLACK);
+        return;
+    }
+
+    if (index < 1 || index > history_count) {
+        vga_print_colored("Invalid index for the history!\n", COLOR_YELLOW_ON_BLACK);
+        return;
+    }
+
+    int array_index = index - 1;
+
+    kfree(history[array_index]);
+
+    for (int i = array_index; i < history_count - 1; i++) {
+        history[i] = history[i + 1];
+    }
+
+    history_count--;
+    vga_print_colored("History entry deleted! (Memory freed)\n", COLOR_GREEN_ON_BLACK);
+}
+
+void history_show() {
+    if (history_count == 0) {
+        vga_print_colored("No history yet!\n", COLOR_YELLOW_ON_BLACK);
+        return;
+    }
+
+    vga_print_colored("=== Calculation History (/h) ===\n", COLOR_GREEN_ON_BLACK);
+    for (int i = 0; i < history_count; i++) {
+        char num[12];
+        int_to_str(i + 1, num);
+        vga_print(num);
+        vga_print(". ");
+        vga_print(history[i]);
+        vga_print("\n");
+    }
+}
+
+// Main shell loop
+void shell_run() {
+    while (1) {
+        char input[40];
+
+        show_prompt();
+        read_line_with_display(input, 40);
+
+        if (strlen(input) == 0) continue;
+
+        // Parse command and arguments
+        char cmd[40];
+        char args[40];
+        int i = 0;
+
+        while (input[i] && input[i] != ' ') {
+            cmd[i] = input[i];
+            i++;
+        }
+        cmd[i] = '\0';
+
+        int j = 0;
+        if (input[i] == ' ') {
+            i++;
+            while (input[i]) {
+                args[j++] = input[i++];
+            }
+        }
+        args[j] = '\0';
+
+        // Global commands
+        if (strcmp(cmd, "exit") == 0 || strcmp(cmd, "EXIT") == 0) {
+            cmd_exit();
+        }
+        else if (strcmp(cmd, "clear") == 0 || strcmp(cmd, "CLEAR") == 0) {
+            cmd_clear();
+        }
+        else if (strcmp(cmd, "help") == 0 || strcmp(cmd, "HELP") == 0) {
+            cmd_help();
+        }
+        else if (strcmp(cmd, "pwd") == 0 || strcmp(cmd, "PWD") == 0) {
+            cmd_pwd();
+        }
+        else if (strcmp(cmd, "mem") == 0 || strcmp(cmd, "MEM") == 0) {
+            cmd_mem();
+        }
+        else if (strcmp(cmd, "cd") == 0 || strcmp(cmd, "CD") == 0) {
+            cmd_cd(args);
+        }
+        else if (strcmp(cmd, "add") == 0 || strcmp(cmd, "ADD") == 0) {
+            cmd_add();
+        }
+        else if (strcmp(cmd, "ls") == 0 || strcmp(cmd, "LS") == 0) {
+            cmd_ls();
+        }
+        else if (strcmp(cmd, "text") == 0 || strcmp(cmd, "TEXT") == 0) {
+            text_editor(args);
+        }
+        // Removed `show` command, `ls` now handles file listing
+        else if (strcmp(cmd, "s") == 0 || strcmp(cmd, "S") == 0) {
+            history_save();
+        }
+        else if (strcmp(cmd, "del") == 0 || strcmp(cmd, "DEL") == 0) {
+            int index = str_to_int(args);
+            history_delete(index);
+        }
+        else {
+            vga_print(cmd);
+            vga_print_colored(": command not found\n", COLOR_YELLOW_ON_BLACK);
+        }
+    }
+}

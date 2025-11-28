@@ -3,34 +3,11 @@
 #define CTRL_S 0x13 // ASCII 19 (Ctrl+S from keyboard driver)
 #define CTRL_X 0x18 // ASCII 24 (Ctrl+X from keyboard driver)
 
-// Assuming this constant is defined in ../include/text.h
-#define MAX_FILE_SIZE 8192
-
-// The structure definition is usually in text.h, but kept here as context from user's provided code
-
-// Global list head for stored files
-static file_entry_t* file_list_head = 0;
-
-/**
- * @brief Finds a file entry by name in the linked list.
- */
-static file_entry_t* find_file(const char* name) {
-    if (!name || strlen(name) == 0) return 0;
-
-    file_entry_t* current = file_list_head;
-    while (current) {
-        // Assuming strcmp is available in std.h
-        if (strcmp(current->name, name) == 0) {
-            return current;
-        }
-        current = current->next;
-    }
-    return 0;
-}
+// The old file_list_head global variable is removed.
+// File management is now handled by the VFS (fs_node_t).
 
 /**
  * @brief Simple read_line function for prompting file names.
- * @note This function handles its own VGA output.
  */
 static void read_line(char* buffer, int max_len) {
     int i = 0;
@@ -40,18 +17,18 @@ static void read_line(char* buffer, int max_len) {
 
         if (c == '\n') {
             buffer[i] = '\0';
-            vga_putchar('\n', COLOR_WHITE_ON_BLACK);
+            console_putchar('\n', COLOR_WHITE_ON_BLACK);
             break;
         } else if (c == '\b') {
             if (i > 0) {
                 i--;
-                vga_putchar('\b', COLOR_WHITE_ON_BLACK);
+                console_putchar('\b', COLOR_WHITE_ON_BLACK);
+                console_putchar(' ', COLOR_WHITE_ON_BLACK); // Clear character
+                console_putchar('\b', COLOR_WHITE_ON_BLACK); // Move cursor back
             }
-        } else if ((c >= '0' && c <= '9') || c == '-' ||
-                   (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                   c == ' ' || c == '.' || c == '_') {
+        } else if ((c >= ' ' && c <= '~')) { // Allow all printable chars
             buffer[i++] = c;
-            vga_putchar(c, COLOR_WHITE_ON_BLACK);
+            console_putchar(c, COLOR_WHITE_ON_BLACK);
         }
     }
 
@@ -60,216 +37,194 @@ static void read_line(char* buffer, int max_len) {
 
 /**
  * @brief Simple text editor command.
- * Clears the screen, allows text input, and saves content to the heap.
- * Now uses Ctrl+S for Save and Ctrl+X for Exit, and supports opening existing files.
- * * @param edit_filename The name of the file to load for editing (or NULL/empty for new file).
+ * @param edit_filename The name of the file to load for editing (or NULL/empty for new file).
  */
 void text_editor(const char* edit_filename) {
     char editor_buffer[MAX_FILE_SIZE];
     size_t current_len = 0;
-    file_entry_t* target_entry = 0; // Pointer to the file being edited/overwritten
+    fs_node_t* target_node = 0; // Pointer to the VFS node being edited/overwritten
 
     // 0. Initial Loading Logic
+    char initial_filename[FS_MAX_NAME] = {0};
+
     if (edit_filename && strlen(edit_filename) > 0) {
-        target_entry = find_file(edit_filename);
-        if (target_entry) {
-            if (target_entry->size >= MAX_FILE_SIZE) {
-                vga_print_colored("Error: File is too large to fit in editor buffer.\n", COLOR_GREEN_ON_BLACK);
+        // Find the node in the current directory
+        target_node = fs_find_node_local(edit_filename, fs_current_dir);
+
+        if (target_node) {
+            if (target_node->type != FS_FILE) {
+                console_print_colored("Error: Cannot edit a directory.\n", COLOR_YELLOW_ON_BLACK);
                 return;
             }
+            if (target_node->size >= MAX_FILE_SIZE) {
+                console_print_colored("Error: File is too large to fit in editor buffer.\n", COLOR_YELLOW_ON_BLACK);
+                return;
+            }
+
             // Load content and size
-            strcpy(editor_buffer, target_entry->content);
-            current_len = target_entry->size;
+            strcpy(initial_filename, target_node->name);
+            strcpy(editor_buffer, target_node->content_data);
+            current_len = target_node->size;
+        } else {
+            // New file with pre-defined name
+            strcpy(initial_filename, edit_filename);
         }
     }
 
     // 1. Clear screen and provide instructions
-    vga_clear_screen();
-    vga_print_colored("Simple Text Editor. Press Ctrl+S to save, Ctrl+X to exit.\n\n", COLOR_YELLOW_ON_BLACK);
+    console_clear_screen();
+    console_print_colored("Simple Text Editor. Press Ctrl+S to save, Ctrl+X to exit.\n\n", COLOR_YELLOW_ON_BLACK);
 
     // Display status and initial content
-    if (target_entry) {
-        vga_print_colored("Editing: ", COLOR_YELLOW_ON_BLACK);
-        vga_print_colored(target_entry->name, COLOR_YELLOW_ON_BLACK);
-        vga_print_colored("\n\n", COLOR_WHITE_ON_BLACK);
-
-        // Print the existing content
-        for (size_t i = 0; i < current_len; ++i) {
-            vga_putchar(editor_buffer[i], COLOR_WHITE_ON_BLACK);
-        }
+    console_print_colored("Editing: ", COLOR_YELLOW_ON_BLACK);
+    if (target_node) {
+        console_print_colored(target_node->name, COLOR_YELLOW_ON_BLACK);
+    } else if (strlen(initial_filename) > 0) {
+        console_print_colored(initial_filename, COLOR_YELLOW_ON_BLACK);
     } else {
-        vga_print_colored("New File.\n\n", COLOR_YELLOW_ON_BLACK);
+        console_print_colored("NEW FILE", COLOR_YELLOW_ON_BLACK);
     }
+    console_print_colored("\n\n", COLOR_WHITE_ON_BLACK);
+
+
+    // Print the existing content
+    for (size_t i = 0; i < current_len; ++i) {
+        console_putchar(editor_buffer[i], COLOR_WHITE_ON_BLACK);
+    }
+
 
     // 2. Main editing loop
     int done = 0; // 1 = save, 2 = exit
     while (!done) {
-        char c = keyboard_read(); // Read character from keyboard buffer
+        char c = keyboard_read();
 
-        // --- UPDATED CONTROL LOGIC ---
         if (c == CTRL_S) {
-            done = 1; // Prepare to save
+            done = 1; // Save
             break;
         } else if (c == CTRL_X) {
-            done = 2; // Prepare to exit without saving
+            done = 2; // Exit
             break;
-        }
-        // --- END UPDATED CONTROL LOGIC ---
-
-        else if (c == '\b') {
+        } else if (c == '\b') {
             // Backspace handling
             if (current_len > 0) {
                 current_len--;
-                vga_putchar('\b', COLOR_WHITE_ON_BLACK);
+                console_putchar('\b', COLOR_WHITE_ON_BLACK);
+                console_putchar(' ', COLOR_WHITE_ON_BLACK); // Clear character
+                console_putchar('\b', COLOR_WHITE_ON_BLACK); // Move cursor back
             }
         } else if (c == '\n') {
             // Newline handling
             if (current_len < MAX_FILE_SIZE - 1) {
                 editor_buffer[current_len++] = '\n';
-                vga_putchar('\n', COLOR_WHITE_ON_BLACK);
+                console_putchar('\n', COLOR_WHITE_ON_BLACK);
             }
         }
-        // Now, all printable ASCII characters, including 's' and 'x', are treated as normal text
         else if ((c >= ' ' && c <= '~') && current_len < MAX_FILE_SIZE - 1) {
+            // Printable characters
             editor_buffer[current_len++] = c;
-            vga_putchar(c, COLOR_WHITE_ON_BLACK);
+            console_putchar(c, COLOR_WHITE_ON_BLACK);
         }
     }
 
     // 3. Post-editing logic
-    vga_clear_screen(); // Clear editing screen to return to prompt environment
+    console_clear_screen(); // Clear editing screen to return to prompt environment
 
     if (done == 2) {
-        vga_print_colored("Exit without saving.\n", COLOR_YELLOW_ON_BLACK);
+        console_print_colored("Exit without saving.\n", COLOR_YELLOW_ON_BLACK);
         return;
     }
 
     // 4. Saving logic (done == 1)
 
-    // a. Prompt for file name, pre-filling if editing an existing file
-    char filename[40];
-    if (target_entry) {
-        strcpy(filename, target_entry->name); // Pre-fill with existing name
+    // a. Prompt for file name
+    char filename[FS_MAX_NAME];
+
+    // Use the initial filename if available, otherwise prompt
+    if (strlen(initial_filename) > 0) {
+        strcpy(filename, initial_filename);
     } else {
         filename[0] = '\0';
     }
 
-    vga_print_colored("Enter filename (max 39 chars): ", COLOR_GREEN_ON_BLACK);
+    console_print_colored("Enter filename (max 39 chars): ", COLOR_GREEN_ON_BLACK);
 
     // Display the current (pre-filled or empty) name
-    vga_print_colored(filename, COLOR_WHITE_ON_BLACK);
+    console_print_colored(filename, COLOR_WHITE_ON_BLACK);
 
     // Call read_line; user input will overwrite/clear the displayed default name
-    read_line(filename, 40);
+    read_line(filename, FS_MAX_NAME);
 
     // b. Validation
     if (current_len == 0 || strlen(filename) == 0) {
-        vga_print_colored("Save cancelled: No content or filename provided.\n", COLOR_YELLOW_ON_BLACK);
+        console_print_colored("Save cancelled: No content or filename provided.\n", COLOR_YELLOW_ON_BLACK);
         return;
     }
 
-    // Determine if we are overwriting an existing file or creating a new one
-    file_entry_t* final_target = find_file(filename);
+    // Determine the final target node based on the user-entered filename
+    fs_node_t* final_target = fs_find_node_local(filename, fs_current_dir);
 
-    // c. Copy data and link the new file / Overwrite logic
+    // c. Overwrite/Creation Logic
     char* content_ptr = 0;
 
-    // --- Overwrite/Update Existing File Logic ---
     if (final_target) {
-        // We are saving to a file that already exists with the final name.
+        // --- Overwrite/Update Existing File ---
 
-        // 1. Handle memory reallocation if the size has changed
-        int needs_realloc = (final_target->size + 1 != current_len + 1);
-
-        if (needs_realloc) {
-            kfree(final_target->content);
-            content_ptr = (char*)kmalloc(current_len + 1);
-            if (!content_ptr) {
-                vga_print_colored("Memory reallocation failed. File not updated.\n", COLOR_YELLOW_ON_BLACK);
-                return;
-            }
-        } else {
-            // No reallocation needed, use the existing pointer
-            content_ptr = final_target->content;
+        // 1. Free old memory if content exists and needs reallocation
+        if (final_target->content_data) {
+             kfree(final_target->content_data);
         }
 
-        // 2. Update content and metadata
-        final_target->content = content_ptr;
-        final_target->size = current_len;
+        // 2. Allocate new memory for content + null terminator
+        content_ptr = (char*)kmalloc(current_len + 1);
+        if (!content_ptr) {
+            console_print_colored("Memory reallocation failed. File not updated.\n", COLOR_YELLOW_ON_BLACK);
+            return;
+        }
 
-        // Copy the edited content (must null-terminate)
-        editor_buffer[current_len] = '\0';
-        strcpy(final_target->content, editor_buffer);
+        // 3. Update VFS node metadata
+        final_target->content_data = content_ptr;
+        final_target->size = current_len;
+        final_target->allocated_size = current_len + 1;
 
     } else {
         // --- New File Creation Logic ---
 
-        // Allocate memory for file content
+        // 1. Allocate memory for file content
         content_ptr = (char*)kmalloc(current_len + 1);
 
         if (!content_ptr) {
-            vga_print_colored("Memory allocation failed. File not saved.\n", COLOR_YELLOW_ON_BLACK);
+            console_print_colored("Memory allocation failed. File not saved.\n", COLOR_YELLOW_ON_BLACK);
             return;
         }
 
-        // Allocate memory for the file entry structure
-        file_entry_t* new_file = (file_entry_t*)kmalloc(sizeof(file_entry_t));
+        // 2. Create the new node in the VFS
+        fs_node_t* new_file = fs_create_node(filename, FS_FILE, fs_current_dir);
+
         if (!new_file) {
             kfree(content_ptr);
-            vga_print_colored("Failed to allocate file structure. File not saved.\n", COLOR_YELLOW_ON_BLACK);
+            console_print_colored("Failed to create file system node. File not saved.\n", COLOR_YELLOW_ON_BLACK);
             return;
         }
 
-        // Copy data and link the new file
-        editor_buffer[current_len] = '\0';
-        strcpy(content_ptr, editor_buffer);
-
-        strcpy(new_file->name, filename);
-        new_file->content = content_ptr;
+        // 3. Update VFS node metadata
+        new_file->content_data = content_ptr;
         new_file->size = current_len;
-        new_file->next = file_list_head; // Prepend to the list
-        file_list_head = new_file;
+        new_file->allocated_size = current_len + 1;
+        final_target = new_file; // Set target for confirmation message
     }
 
-    // d. Confirmation message
-    vga_print_colored("File '", COLOR_GREEN_ON_BLACK);
-    vga_print_colored(filename, COLOR_GREEN_ON_BLACK);
-    vga_print_colored("' saved. Size: ", COLOR_GREEN_ON_BLACK);
+    // d. Copy the edited content (must null-terminate)
+    editor_buffer[current_len] = '\0';
+    strcpy(content_ptr, editor_buffer);
+
+    // e. Confirmation message
+    console_print_colored("File '", COLOR_GREEN_ON_BLACK);
+    console_print_colored(final_target->name, COLOR_YELLOW_ON_BLACK);
+    console_print_colored("' saved. Size: ", COLOR_GREEN_ON_BLACK);
     char size_str[12];
     int_to_str((int)current_len, size_str);
-    vga_print_colored(size_str, COLOR_GREEN_ON_BLACK);
-    vga_print_colored(" bytes. (Check 'mem' to see the page allocation increase)\n", COLOR_GREEN_ON_BLACK);
+    console_print_colored(size_str, COLOR_YELLOW_ON_BLACK);
+    console_print_colored(" bytes.\n", COLOR_GREEN_ON_BLACK);
 }
 
-/**
- * @brief Lists all files currently stored in memory.
- */
-void show_files() {
-    if (!file_list_head) {
-        vga_print_colored("No files stored yet.\n", COLOR_YELLOW_ON_BLACK);
-        return;
-    }
-
-    vga_print_colored("=== Stored Files (In-Memory) ===\n", COLOR_GREEN_ON_BLACK);
-    file_entry_t* current = file_list_head;
-    while (current) {
-        vga_print_colored("Name: ", COLOR_WHITE_ON_BLACK);
-        vga_print_colored(current->name, COLOR_YELLOW_ON_BLACK);
-
-        // Print size
-        vga_print_colored(" (Size: ", COLOR_WHITE_ON_BLACK);
-        char size_str[12];
-        int_to_str((int)current->size, size_str);
-        vga_print_colored(size_str, COLOR_WHITE_ON_BLACK);
-        vga_print_colored(" bytes) ", COLOR_WHITE_ON_BLACK);
-
-        // Print content address
-        vga_print_colored("[Addr: 0x", COLOR_WHITE_ON_BLACK);
-        char addr_str[12];
-        int_to_str((int)current->content, addr_str);
-        vga_print_colored(addr_str, COLOR_WHITE_ON_BLACK);
-        vga_print_colored("]\n", COLOR_WHITE_ON_BLACK);
-
-        current = current->next;
-    }
-}
+// The old show_files() is removed as listing is now handled by shell's cmd_ls

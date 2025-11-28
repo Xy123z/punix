@@ -1,5 +1,11 @@
 // src/interrupt.c - Interrupt handling and keyboard driver
 #include "../include/interrupt.h"
+#include "../include/types.h" // For uint8_t, uint16_t, uint32_t
+#include "../include/console.h"
+// --- Scrolling Scan Codes ---
+#define SC_ARROW_UP   0x48
+#define SC_ARROW_DOWN 0x50
+// ----------------------------
 
 // Scancode Definitions for Control Key and target letters
 #define LCTRL_SCANCODE 0x1D
@@ -15,12 +21,19 @@ struct idt_entry idt[256];
 struct idt_ptr idtp;
 
 // Keyboard buffer (circular)
+#define KEYBOARD_BUFFER_SIZE 256
 static char keyboard_buffer[KEYBOARD_BUFFER_SIZE];
 static volatile int kbd_read_pos = 0;
 static volatile int kbd_write_pos = 0;
 
 // NEW: Global state flag to track if the control key is pressed
 static volatile int ctrl_pressed = 0;
+
+// --- External Console/VGA Functions (Assumed to be defined elsewhere) ---
+// These are needed for scrolling the display
+extern void console_scroll_up();
+extern void console_scroll_down();
+// -------------------------------------------------------------------------
 
 // Port I/O
 static inline uint8_t inb(uint16_t port) {
@@ -59,6 +72,17 @@ void keyboard_handler() {
 
     // Only handle key presses (not releases)
     if (!(scancode & 0x80)) {
+
+        // --- SCROLLING LOGIC ADDED HERE ---
+        if (scancode == SC_ARROW_UP) {
+            console_scroll_up();
+            goto end_handler;
+        } else if (scancode == SC_ARROW_DOWN) {
+            console_scroll_down();
+            goto end_handler;
+        }
+        // ----------------------------------
+
         if (scancode < sizeof(scancode_to_ascii)) {
             char c = scancode_to_ascii[scancode];
 
