@@ -1,335 +1,486 @@
+/**
+ * src/fs.c - Lazy Loading Filesystem (Load-On-Demand)
+ * Only loads nodes from disk when accessed, not at boot
+ */
+
 #include "../include/fs.h"
+#include "../include/string.h"
+#include "../include/memory.h"
 #include "../include/console.h"
-#include "../include/vga.h"
-#include "../include/memory.h" // kmalloc, kfree
-#include "../include/interrupt.h"
-#include "../include/shell.h" // For ROOT_ACCESS_GRANTED global
-#include "../include/string.h" // strcmp, strcpy, strlen, memset, memcpy
-#include "../include/types.h"
+#include "../include/ata.h"
 
-// Global state tracking variables
-fs_node_t* fs_root = 0;
-fs_node_t* fs_current_dir = 0;
+// --- Configuration ---
+#define FS_MAGIC         0xEF5342
+#define FS_MAX_NODES     128
+#define FS_ROOT_ID       1
+#define SECTOR_SIZE      512
 
-// Internal helpers
-static int fs_add_child(fs_node_t* parent, fs_node_t* child);
-static int fs_remove_child(fs_node_t* parent, fs_node_t* child);
-static fs_node_t* fs_recursive_find_node(fs_node_t* current_node, const char* path);
-static void fs_recursive_delete(fs_node_t* node);
+// --- NEW: Cache Management ---
+#define FS_CACHE_SIZE    32  // Keep 32 nodes in RAM (adjustable)
 
+typedef struct {
+    fs_node_t node;          // The actual node data
+    uint32_t  id;            // Node ID (0 = empty slot)
+    uint32_t  last_access;   // For LRU eviction
+    uint8_t   dirty;         // 1 = modified, needs write-back
+} fs_cache_entry_t;
+
+// --- Data Structures ---
+typedef struct {
+    uint32_t magic;
+    uint32_t root_id;
+    uint32_t next_free_id;
+    uint32_t total_nodes;
+    uint32_t used_sectors;
+    uint8_t  reserved[492];
+} superblock_t;
+
+// --- Globals ---
+uint32_t fs_root_id = FS_ROOT_ID;
+uint32_t fs_current_dir_id = FS_ROOT_ID;
+
+static superblock_t sb;
+static fs_cache_entry_t cache[FS_CACHE_SIZE];  // Cache instead of full table!
+static uint32_t access_counter = 0;            // For LRU tracking
+
+// Helper macros
+#define NODE_ID_TO_SECTOR(id) (FS_NODE_TABLE_START + (id) - 1)
+
+// --- Internal Helpers ---
+
+static void save_superblock() {
+    ata_write_sectors(FS_SUPERBLOCK_SECTOR, 1, &sb);
+}
 
 /**
- * @brief Allocates and initializes a new file system node, including dynamic children array for directories.
+ * @brief Finds a node in the cache by ID
+ * @return Index in cache, or -1 if not found
  */
-static fs_node_t* fs_node_create(const char* name, fs_node_type_t type, fs_node_t* parent) {
-    fs_node_t* node = (fs_node_t*)kmalloc(sizeof(fs_node_t));
+static int cache_find(uint32_t id) {
+    for (int i = 0; i < FS_CACHE_SIZE; i++) {
+        if (cache[i].id == id) {
+            cache[i].last_access = ++access_counter;  // Update LRU
+            return i;
+        }
+    }
+    return -1;
+}
+
+/**
+ * @brief Finds an empty slot in cache, or evicts least recently used
+ * @return Index of available slot
+ */
+static int cache_find_slot() {
+    // First, try to find an empty slot
+    for (int i = 0; i < FS_CACHE_SIZE; i++) {
+        if (cache[i].id == 0) {
+            return i;
+        }
+    }
+
+    // No empty slots - find LRU (least recently used)
+    int lru_index = 0;
+    uint32_t oldest_access = cache[0].last_access;
+
+    for (int i = 1; i < FS_CACHE_SIZE; i++) {
+        if (cache[i].last_access < oldest_access) {
+            oldest_access = cache[i].last_access;
+            lru_index = i;
+        }
+    }
+
+    // Write back if dirty
+    if (cache[lru_index].dirty) {
+        ata_write_sectors(NODE_ID_TO_SECTOR(cache[lru_index].id),
+                         1, &cache[lru_index].node);
+    }
+
+    return lru_index;
+}
+
+/**
+ * @brief Loads a node from disk into cache
+ * @return Pointer to cached node, or NULL on error
+ */
+static fs_node_t* cache_load(uint32_t id) {
+    if (id == 0 || id >= FS_MAX_NODES) return 0;
+
+    // Check if already in cache
+    int idx = cache_find(id);
+    if (idx >= 0) {
+        return &cache[idx].node;  // Cache hit!
+    }
+
+    // Not in cache - load from disk
+    int slot = cache_find_slot();
+
+    // Read from disk
+    ata_read_sectors(NODE_ID_TO_SECTOR(id), 1, &cache[slot].node);
+
+    // Validate that we got the right node
+    if (cache[slot].node.id != id) {
+        return 0;  // Node doesn't exist or disk corruption
+    }
+
+    // Update cache metadata
+    cache[slot].id = id;
+    cache[slot].dirty = 0;
+    cache[slot].last_access = ++access_counter;
+
+    return &cache[slot].node;
+}
+
+/**
+ * @brief Marks a cached node as dirty (needs write-back)
+ */
+static void cache_mark_dirty(uint32_t id) {
+    int idx = cache_find(id);
+    if (idx >= 0) {
+        cache[idx].dirty = 1;
+    }
+}
+
+/**
+ * @brief Writes a node to disk and updates cache
+ */
+static void save_node(uint32_t id) {
+    if (id == 0 || id >= FS_MAX_NODES) return;
+
+    int idx = cache_find(id);
+    if (idx >= 0) {
+        // Node is in cache - write it
+        ata_write_sectors(NODE_ID_TO_SECTOR(id), 1, &cache[idx].node);
+        cache[idx].dirty = 0;
+    } else {
+        // Node not in cache - load it first, then write
+        fs_node_t* node = cache_load(id);
+        if (node) {
+            ata_write_sectors(NODE_ID_TO_SECTOR(id), 1, node);
+            cache_mark_dirty(id);
+            cache[cache_find(id)].dirty = 0;
+        }
+    }
+}
+
+/**
+ * @brief Flushes all dirty nodes to disk
+ */
+void fs_sync() {
+    for (int i = 0; i < FS_CACHE_SIZE; i++) {
+        if (cache[i].id != 0 && cache[i].dirty) {
+            ata_write_sectors(NODE_ID_TO_SECTOR(cache[i].id),
+                            1, &cache[i].node);
+            cache[i].dirty = 0;
+        }
+    }
+    console_print_colored("FS: Cache synced to disk.\n", COLOR_GREEN_ON_BLACK);
+}
+
+// Formats the disk
+static void mkfs() {
+    console_print_colored("FS: Formatting drive...\n", COLOR_YELLOW_ON_BLACK);
+
+    // Clear cache
+    memset(cache, 0, sizeof(cache));
+
+    // Setup Superblock
+    sb.magic = FS_MAGIC;
+    sb.root_id = FS_ROOT_ID;
+    sb.next_free_id = 2;
+    sb.total_nodes = 1;
+    sb.used_sectors = 1 + 60 + 1 + 1;  // boot + kernel + superblock + root
+
+    // Create Root Node
+    fs_node_t* root = cache_load(FS_ROOT_ID);
+    if (!root) {
+        // Need to manually set up first node in cache
+        int slot = cache_find_slot();
+        cache[slot].id = FS_ROOT_ID;
+        cache[slot].node.id = FS_ROOT_ID;
+        cache[slot].node.parent_id = FS_ROOT_ID;
+        cache[slot].node.type = FS_TYPE_DIRECTORY;
+        strcpy(cache[slot].node.name, "");
+        cache[slot].node.size = 0;
+        cache[slot].node.child_count = 0;
+        cache[slot].dirty = 1;
+        cache[slot].last_access = ++access_counter;
+        root = &cache[slot].node;
+    } else {
+        root->id = FS_ROOT_ID;
+        root->parent_id = FS_ROOT_ID;
+        root->type = FS_TYPE_DIRECTORY;
+        strcpy(root->name, "");
+        root->size = 0;
+        root->child_count = 0;
+        cache_mark_dirty(FS_ROOT_ID);
+    }
+
+    save_node(FS_ROOT_ID);
+
+    // Create /a directory
+    uint32_t a_id = sb.next_free_id++;
+    sb.total_nodes++;
+    sb.used_sectors++;
+
+    int slot = cache_find_slot();
+    cache[slot].id = a_id;
+    cache[slot].node.id = a_id;
+    cache[slot].node.parent_id = FS_ROOT_ID;
+    cache[slot].node.type = FS_TYPE_DIRECTORY;
+    strcpy(cache[slot].node.name, "a");
+    cache[slot].node.size = 0;
+    cache[slot].node.child_count = 0;
+    cache[slot].dirty = 1;
+    cache[slot].last_access = ++access_counter;
+
+    root->child_ids[root->child_count++] = a_id;
+    cache_mark_dirty(FS_ROOT_ID);
+    save_node(a_id);
+    console_print_colored("FS: Created /a directory.\n", COLOR_GREEN_ON_BLACK);
+
+    // Create /h directory
+    uint32_t h_id = sb.next_free_id++;
+    sb.total_nodes++;
+    sb.used_sectors++;
+
+    slot = cache_find_slot();
+    cache[slot].id = h_id;
+    cache[slot].node.id = h_id;
+    cache[slot].node.parent_id = FS_ROOT_ID;
+    cache[slot].node.type = FS_TYPE_DIRECTORY;
+    strcpy(cache[slot].node.name, "h");
+    cache[slot].node.size = 0;
+    cache[slot].node.child_count = 0;
+    cache[slot].dirty = 1;
+    cache[slot].last_access = ++access_counter;
+
+    root->child_ids[root->child_count++] = h_id;
+    cache_mark_dirty(FS_ROOT_ID);
+    save_node(h_id);
+    console_print_colored("FS: Created /h directory.\n", COLOR_GREEN_ON_BLACK);
+
+    save_node(FS_ROOT_ID);
+    save_superblock();
+
+    console_print_colored("FS: Format complete.\n", COLOR_GREEN_ON_BLACK);
+}
+
+// --- Public API ---
+
+void fs_init() {
+    // Initialize cache
+    memset(cache, 0, sizeof(cache));
+    access_counter = 0;
+
+    // Read Superblock ONLY (not all nodes!)
+    ata_read_sectors(FS_SUPERBLOCK_SECTOR, 1, &sb);
+
+    if (sb.magic != FS_MAGIC) {
+        console_print_colored("FS: No filesystem detected.\n", COLOR_LIGHT_RED);
+        mkfs();
+    } else {
+        console_print_colored("FS: Filesystem mounted (lazy loading enabled).\n", COLOR_GREEN_ON_BLACK);
+        // NOTE: We DON'T load all nodes here anymore!
+        // They will be loaded on-demand when accessed
+    }
+
+    fs_root_id = FS_ROOT_ID;
+
+    // Load root and /a into cache for initial access
+    cache_load(FS_ROOT_ID);
+
+    fs_node_t* dir_a = fs_find_node("a", fs_root_id);
+    if (dir_a && dir_a->type == FS_TYPE_DIRECTORY) {
+        fs_current_dir_id = dir_a->id;
+        console_print_colored("FS: Working directory set to /a.\n", COLOR_GREEN_ON_BLACK);
+    } else {
+        fs_current_dir_id = fs_root_id;
+    }
+}
+
+// Get node - now uses cache with lazy loading!
+fs_node_t* fs_get_node(uint32_t id) {
+    return cache_load(id);  // Loads from disk if not in cache
+}
+
+int fs_update_node(fs_node_t* node) {
+    if (!node || node->id == 0) return 0;
+    cache_mark_dirty(node->id);
+    save_node(node->id);
+    return 1;
+}
+
+uint32_t fs_find_node_local_id(uint32_t parent_id, char* name) {
+    fs_node_t* parent = fs_get_node(parent_id);  // Lazy loads parent
+    if (!parent || parent->type != FS_TYPE_DIRECTORY) return 0;
+
+    for (uint32_t i = 0; i < parent->child_count; i++) {
+        uint32_t child_id = parent->child_ids[i];
+        fs_node_t* child = fs_get_node(child_id);  // Lazy loads child
+        if (child && strcmp(child->name, name) == 0) {
+            return child_id;
+        }
+    }
+    return 0;
+}
+
+fs_node_t* fs_find_node(char* path, uint32_t start_id) {
+    if (!path) return 0;
+
+    uint32_t current_id = start_id;
+
+    if (path[0] == '/') {
+        current_id = fs_root_id;
+        path++;
+    }
+
+    char temp_path[128];
+    strncpy(temp_path, path, 127);
+    temp_path[127] = '\0';
+    char* component = temp_path;
+    char* next_component = 0;
+
+    while (*component != '\0') {
+        int i = 0;
+        while (component[i] != '/' && component[i] != '\0') {
+            i++;
+        }
+
+        if (component[i] == '/') {
+            component[i] = '\0';
+            next_component = component + i + 1;
+        } else {
+            next_component = 0;
+        }
+
+        if (strlen(component) > 0) {
+            if (strcmp(component, "..") == 0) {
+                fs_node_t* cur = fs_get_node(current_id);  // Lazy load
+                if (cur) current_id = cur->parent_id;
+            }
+            else if (strcmp(component, ".") == 0) {
+                // Do nothing
+            }
+            else {
+                uint32_t next_id = fs_find_node_local_id(current_id, component);
+                if (next_id == 0) return 0;
+                current_id = next_id;
+            }
+        }
+
+        if (!next_component) break;
+        component = next_component;
+    }
+
+    return fs_get_node(current_id);  // Lazy load final node
+}
+
+int fs_create_node(uint32_t parent_id, char* name, uint8_t type) {
+    if (sb.next_free_id >= FS_MAX_NODES) {
+        console_print_colored("FS: Disk full.\n", COLOR_LIGHT_RED);
+        return 0;
+    }
+
+    fs_node_t* parent = fs_get_node(parent_id);  // Lazy load parent
+    if (!parent || parent->type != FS_TYPE_DIRECTORY) return 0;
+    if (parent->child_count >= 16) {
+        console_print_colored("FS: Directory full.\n", COLOR_LIGHT_RED);
+        return 0;
+    }
+
+    uint32_t new_id = sb.next_free_id++;
+    sb.total_nodes++;
+    sb.used_sectors++;
+    save_superblock();
+
+    // Create new node in cache
+    int slot = cache_find_slot();
+    fs_node_t* node = &cache[slot].node;
+
+    memset(node, 0, sizeof(fs_node_t));
+    node->id = new_id;
+    node->parent_id = parent_id;
+    node->type = type;
+    strncpy(node->name, name, 63);
+    node->name[63] = '\0';
+    node->size = 0;
+    node->child_count = 0;
+
+    cache[slot].id = new_id;
+    cache[slot].dirty = 1;
+    cache[slot].last_access = ++access_counter;
+
+    parent->child_ids[parent->child_count++] = new_id;
+    cache_mark_dirty(parent_id);
+
+    save_node(new_id);
+    save_node(parent_id);
+
+    return 1;
+}
+
+int fs_delete_node(uint32_t id) {
+    fs_node_t* node = fs_get_node(id);  // Lazy load
     if (!node) return 0;
 
-    memset(node, 0, sizeof(fs_node_t)); // Clear the node structure
-
-    // Copy and truncate name
-    if (strlen(name) < FS_MAX_NAME) {
-        strcpy(node->name, name);
-    } else {
-        strncpy(node->name, name, FS_MAX_NAME - 1);
-        node->name[FS_MAX_NAME - 1] = '\0';
+    if (node->type == FS_TYPE_DIRECTORY && node->child_count > 0) {
+        return 0;
     }
 
-    node->type = type;
-    node->parent = parent;
-    node->num_children = 0;
-
-    // Initialize dynamic children array for directories
-    if (type == FS_DIRECTORY) {
-        node->children_capacity = FS_INITIAL_CHILDREN;
-        node->children = (fs_node_t**)kmalloc(node->children_capacity * sizeof(fs_node_t*));
-        if (!node->children) {
-            kfree(node);
-            return 0; // Failed to allocate children array
-        }
-        memset(node->children, 0, node->children_capacity * sizeof(fs_node_t*));
-    } else {
-        node->children_capacity = 0;
-        node->children = 0;
-    }
-
-    return node;
-}
-
-/**
- * @brief Attempts to add a child node to a directory node, resizing the array if necessary.
- * @return 0 on success, -1 on failure.
- */
-static int fs_add_child(fs_node_t* parent, fs_node_t* child) {
-    if (parent->type != FS_DIRECTORY) {
-        return -1; // Not a directory
-    }
-
-    // Check if resize is needed (dynamic expansion)
-    if (parent->num_children >= parent->children_capacity) {
-        int new_capacity = parent->children_capacity * 2;
-        if (new_capacity == 0) new_capacity = FS_INITIAL_CHILDREN;
-
-        fs_node_t** new_children = (fs_node_t**)kmalloc(new_capacity * sizeof(fs_node_t*));
-        if (!new_children) {
-            console_print_colored("Error: Failed to reallocate directory children.\n", COLOR_YELLOW_ON_BLACK);
-            return -1;
-        }
-
-        // Copy existing children to the new array
-        memcpy(new_children, parent->children, parent->num_children * sizeof(fs_node_t*));
-
-        // Free the old array and update pointers
-        kfree(parent->children);
-        parent->children = new_children;
-        parent->children_capacity = new_capacity;
-    }
-
-    // Add the new child
-    parent->children[parent->num_children] = child;
-    parent->num_children++;
-    child->parent = parent;
-    return 0;
-}
-
-/**
- * @brief Removes a child node from a directory node's list.
- * @return 0 on success, -1 if child not found.
- */
-static int fs_remove_child(fs_node_t* parent, fs_node_t* child) {
-    if (parent->type != FS_DIRECTORY) return -1;
-
-    for (int i = 0; i < parent->num_children; ++i) {
-        if (parent->children[i] == child) {
-            // Shift elements left to fill the gap
-            for (int j = i; j < parent->num_children - 1; ++j) {
-                parent->children[j] = parent->children[j + 1];
+    fs_node_t* parent = fs_get_node(node->parent_id);  // Lazy load parent
+    if (parent) {
+        int found = 0;
+        for (uint32_t i = 0; i < parent->child_count; i++) {
+            if (parent->child_ids[i] == id) {
+                for (uint32_t j = i; j < parent->child_count - 1; j++) {
+                    parent->child_ids[j] = parent->child_ids[j+1];
+                }
+                parent->child_count--;
+                found = 1;
+                break;
             }
-            parent->num_children--;
-            parent->children[parent->num_children] = 0; // Clear the last pointer
-            return 0;
         }
-    }
-    return -1; // Child not found
-}
-
-/**
- * @brief Recursively deletes a node and all its contents (files and subdirectories).
- * This function should only be called by fs_delete_node.
- */
-static void fs_recursive_delete(fs_node_t* node) {
-    if (!node) return;
-
-    // 1. If it's a directory, recursively delete all children
-    if (node->type == FS_DIRECTORY) {
-        for (int i = 0; i < node->num_children; ++i) {
-            fs_recursive_delete(node->children[i]);
-        }
-        // Free the dynamic children array itself
-        if (node->children) {
-            kfree(node->children);
-        }
-    }
-    // 2. If it's a file, free its content data
-    else if (node->type == FS_FILE) {
-        if (node->content_data) {
-            kfree(node->content_data);
+        if (found) {
+            cache_mark_dirty(parent->id);
+            save_node(parent->id);
         }
     }
 
-    // 3. Free the node structure itself
-    kfree(node);
-}
+    sb.total_nodes--;
+    sb.used_sectors--;
+    save_superblock();
 
-/**
- * @brief Deletes a file system node. It is only safe to delete a directory if it is empty.
- * @param node The node to delete.
- * @return 0 on success, -1 on failure (e.g., node is root or not empty).
- */
-int fs_delete_node(fs_node_t* node) {
-    if (!node || node == fs_root) return -1; // Cannot delete root
+    memset(node, 0, sizeof(fs_node_t));
+    save_node(id);
 
-    // If it's a directory, ensure it's empty
-    if (node->type == FS_DIRECTORY && node->num_children > 0) {
-        console_print_colored("Error: Directory not empty.\n", COLOR_YELLOW_ON_BLACK);
-        return -1;
+    // Invalidate cache entry
+    int idx = cache_find(id);
+    if (idx >= 0) {
+        cache[idx].id = 0;
+        cache[idx].dirty = 0;
     }
 
-    // 1. Remove node from its parent's children list
-    if (node->parent) {
-        fs_remove_child(node->parent, node);
-    }
-
-    // 2. Recursively free the node's memory
-    fs_recursive_delete(node);
-
-    return 0;
+    return 1;
 }
 
-
-/**
- * @brief Initializes the RAMFS, creating the root directory and initial subdirectories.
- */
-void fs_init() {
-    fs_root = fs_node_create("/", FS_DIRECTORY, 0); // Root has no parent
-    if (!fs_root) {
-        console_print_colored("FS Init Error: Failed to create root node.\n", COLOR_YELLOW_ON_BLACK);
-        return;
-    }
-
-    fs_current_dir = fs_root; // Start in root
-
-    // Create /a and /h directories
-    fs_node_t* dir_a = fs_node_create("a", FS_DIRECTORY, fs_root);
-    fs_node_t* dir_h = fs_node_create("h", FS_DIRECTORY, fs_root);
-
-    if (dir_a) fs_add_child(fs_root, dir_a);
-    if (dir_h) fs_add_child(fs_root, dir_h);
-
-    console_print_colored("RAMFS initialized (Dynamic/Recursive VFS enabled).\n", COLOR_GREEN_ON_BLACK);
+void fs_get_disk_stats(uint32_t* total_kb, uint32_t* used_kb, uint32_t* free_kb) {
+    *total_kb = 50 * 1024;
+    *used_kb = (sb.used_sectors * SECTOR_SIZE) / 1024;
+    *free_kb = *total_kb - *used_kb;
 }
 
-/**
- * @brief Locates a node by name within a starting directory (relative lookup).
- * @return Pointer to the node if found, 0 otherwise.
- */
-fs_node_t* fs_find_node_local(const char* name, fs_node_t* start_node) {
-    if (!start_node || start_node->type != FS_DIRECTORY) return 0;
+// NEW: Get cache statistics
+void fs_get_cache_stats(uint32_t* cache_size, uint32_t* cached_nodes, uint32_t* dirty_nodes) {
+    *cache_size = FS_CACHE_SIZE;
+    *cached_nodes = 0;
+    *dirty_nodes = 0;
 
-    for (int i = 0; i < start_node->num_children; ++i) {
-        if (strcmp(start_node->children[i]->name, name) == 0) {
-            return start_node->children[i];
+    for (int i = 0; i < FS_CACHE_SIZE; i++) {
+        if (cache[i].id != 0) {
+            (*cached_nodes)++;
+            if (cache[i].dirty) {
+                (*dirty_nodes)++;
+            }
         }
     }
-    return 0;
-}
-
-/**
- * @brief Internal recursive function to resolve multi-component paths.
- */
-static fs_node_t* fs_recursive_find_node(fs_node_t* current_node, const char* path) {
-    if (!current_node || *path == '\0') {
-        return current_node;
-    }
-
-    // Find the end of the current component (up to '/' or '\0')
-    char component[FS_MAX_NAME];
-    int len = 0;
-    while (*path != '/' && *path != '\0' && len < FS_MAX_NAME - 1) {
-        component[len++] = *path++;
-    }
-    component[len] = '\0';
-
-    // Move path past the separator, if any
-    if (*path == '/') path++;
-
-    // Handle special components
-    if (strcmp(component, ".") == 0) {
-        // Current directory: recurse with the rest of the path
-        return fs_recursive_find_node(current_node, path);
-    } else if (strcmp(component, "..") == 0) {
-        // Parent directory: recurse from parent
-        return fs_recursive_find_node(current_node->parent ? current_node->parent : fs_root, path);
-    } else if (len == 0) {
-        // Handles trailing slashes (e.g., /a/b/) by returning the current node
-        return current_node;
-    }
-
-    // Look for the component locally
-    fs_node_t* next_node = fs_find_node_local(component, current_node);
-
-    if (!next_node) {
-        return 0; // Component not found
-    }
-
-    // If there are more path components, and the next node is a directory, continue recursion
-    if (*path != '\0') {
-        if (next_node->type == FS_DIRECTORY) {
-            return fs_recursive_find_node(next_node, path);
-        } else {
-            return 0; // Cannot traverse into a file
-        }
-    }
-
-    return next_node; // End of path reached
-}
-
-/**
- * @brief Finds a file system node based on a full or relative path.
- * The entry point for path resolution.
- * @param path The path string (e.g., "a", "../b/c", "/usr/bin").
- * @param start_node The directory to begin the search from.
- * @return Pointer to the found node, or 0.
- */
-fs_node_t* fs_find_node(const char* path, fs_node_t* start_node) {
-    if (!start_node) return 0;
-    if (path == 0 || *path == '\0') return start_node; // Empty path means current directory
-
-    fs_node_t* current = start_node;
-    const char* path_ptr = path;
-
-    // Determine the starting point: absolute path starts at root
-    if (path[0] == '/') {
-        current = fs_root;
-        path_ptr++; // Skip the leading slash
-    }
-
-    return fs_recursive_find_node(current, path_ptr);
-}
-
-/**
- * @brief Changes the current working directory.
- * @param path The path to the new directory.
- * @return 0 on success, -1 on root access denied (original kernel logic), -2 on not found/not a directory.
- */
-int fs_change_dir(const char* path) {
-    fs_node_t* next_dir = fs_find_node(path, fs_current_dir);
-
-    if (next_dir && next_dir->type == FS_DIRECTORY) {
-        // Preservation of original root access denial logic
-        if (next_dir == fs_root && !ROOT_ACCESS_GRANTED && fs_current_dir != fs_root) {
-             return -1; // Specific code for root access denial
-        }
-
-        fs_current_dir = next_dir;
-        return 0;
-    }
-
-    return -2; // Not found or not a directory
-}
-
-/**
- * @brief Creates a new file or directory node within the current directory.
- * @param name The name of the new entry.
- * @param type The type (FS_FILE or FS_DIRECTORY).
- * @param parent The parent directory to create the node in.
- * @return Pointer to the newly created node, or 0 on failure.
- */
-fs_node_t* fs_create_node(const char* name, fs_node_type_t type, fs_node_t* parent) {
-    // 1. Check if name already exists
-    if (fs_find_node_local(name, parent)) {
-        console_print_colored("Error: Name already exists in directory.\n", COLOR_YELLOW_ON_BLACK);
-        return 0;
-    }
-
-    // Simple validation for names that could confuse the path resolver
-    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0 || strchr(name, '/') != 0) {
-        console_print_colored("Error: Invalid name (cannot be '.', '..', or contain '/').\n", COLOR_YELLOW_ON_BLACK);
-        return 0;
-    }
-
-    // 2. Create and add node
-    fs_node_t* new_node = fs_node_create(name, type, parent);
-    if (!new_node) {
-        console_print_colored("Error: Failed to allocate new node.\n", COLOR_YELLOW_ON_BLACK);
-        return 0;
-    }
-
-    if (fs_add_child(parent, new_node) != 0) {
-        // If adding failed (e.g., due to memory reallocation failure)
-        kfree(new_node);
-        console_print_colored("Error: Failed to add node to parent (memory full?).\n", COLOR_YELLOW_ON_BLACK);
-        return 0;
-    }
-    return new_node;
 }
