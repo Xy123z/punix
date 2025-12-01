@@ -1,6 +1,6 @@
 /**
  * src/shell.c - Enhanced Shell implementation
- * Features: sudo, shutdown command, add with save, mem with disk stats
+ * Features: sudo, shutdown command, add with save, mem with disk stats, credential management
  */
 #include "../include/shell.h"
 #include "../include/console.h"
@@ -9,6 +9,7 @@
 #include "../include/string.h"
 #include "../include/text.h"
 #include "../include/fs.h"
+#include "../include/auth.h"
 
 // --- External FS Globals (From fs.c) ---
 extern uint32_t fs_root_id;
@@ -421,9 +422,34 @@ void cmd_sudo(char* args) {
         return;
     }
 
-    // Check if it's the shutdown command
-    if (strcmp(args, "shutdown") != 0) {
-        console_print_colored("sudo: only 'shutdown' command is supported\n", COLOR_YELLOW_ON_BLACK);
+    // Parse the command after sudo
+    char cmd[40];
+    char cmd_args[40];
+    int i = 0;
+
+    // Extract command
+    while (args[i] && args[i] != ' ') {
+        cmd[i] = args[i];
+        i++;
+    }
+    cmd[i] = '\0';
+
+    // Extract arguments
+    int j = 0;
+    if (args[i] == ' ') {
+        i++;
+        while (args[i] == ' ') i++;
+        while (args[i]) {
+            cmd_args[j++] = args[i++];
+        }
+    }
+    cmd_args[j] = '\0';
+
+    // Check if it's a privileged command
+    if (strcmp(cmd, "shutdown") != 0 &&
+        strcmp(cmd, "chuser") != 0 &&
+        strcmp(cmd, "chpasswd") != 0) {
+        console_print_colored("sudo: only 'shutdown', 'chuser', and 'chpasswd' commands are supported\n", COLOR_YELLOW_ON_BLACK);
         return;
     }
 
@@ -435,8 +461,14 @@ void cmd_sudo(char* args) {
     read_line_with_display(pass, MAX_PASSWORD_LEN);
 
     if (strcmp(pass, ROOT_PASSWORD) == 0) {
-        // Execute shutdown with temporary privilege
-        cmd_shutdown();
+        // Execute command with temporary privilege
+        if (strcmp(cmd, "shutdown") == 0) {
+            cmd_shutdown();
+        } else if (strcmp(cmd, "chuser") == 0) {
+            auth_change_username(read_line_with_display);
+        } else if (strcmp(cmd, "chpasswd") == 0) {
+            auth_change_password(read_line_with_display);
+        }
     } else {
         console_print_colored("sudo: authentication failed\n", COLOR_LIGHT_RED);
     }
@@ -461,6 +493,26 @@ void cmd_shutdown() {
 
     // If all else fails, halt
     while(1) __asm__ volatile("hlt");
+}
+
+// --- NEW: Change Username Command ---
+void cmd_chuser() {
+    if (!ROOT_ACCESS_GRANTED) {
+        console_print_colored("chuser: permission denied (try 'sudo chuser')\n", COLOR_LIGHT_RED);
+        return;
+    }
+
+    auth_change_username(read_line_with_display);
+}
+
+// --- NEW: Change Password Command ---
+void cmd_chpasswd() {
+    if (!ROOT_ACCESS_GRANTED) {
+        console_print_colored("chpasswd: permission denied (try 'sudo chpasswd')\n", COLOR_LIGHT_RED);
+        return;
+    }
+
+    auth_change_password(read_line_with_display);
 }
 
 void cmd_help() {
@@ -491,6 +543,8 @@ void cmd_help() {
     console_print("  exit          - Exit root mode\n");
     console_print("  sudo [cmd]    - Execute command with root privilege\n");
     console_print("  shutdown      - Shutdown system (requires root)\n");
+    console_print("  chuser        - Change username (requires root)\n");
+    console_print("  chpasswd      - Change password (requires root)\n");
     console_print("\n");
 
     console_print_colored("Application Commands (requires /a):\n", COLOR_YELLOW_ON_BLACK);
@@ -566,6 +620,8 @@ void shell_run() {
         else if (strcmp(cmd, "sudo") == 0) cmd_sudo(args);
         else if (strcmp(cmd, "shutdown") == 0) cmd_shutdown();
         else if (strcmp(cmd, "sync") == 0) fs_sync();
+        else if (strcmp(cmd, "chuser") == 0) cmd_chuser();
+        else if (strcmp(cmd, "chpasswd") == 0) cmd_chpasswd();
         else {
             console_print(cmd);
             console_print_colored(": command not found\n", COLOR_YELLOW_ON_BLACK);

@@ -58,13 +58,18 @@ echo "[12/12] Compiling math.c..."
 gcc $CFLAGS -c src/math.c -o math.o
 if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
 
+
+echo "[12/12] Compiling auth.c..."
+gcc $CFLAGS -c src/auth.c -o auth.o
+if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
+
 echo "[13/12] Compiling kernel.c..."
 gcc $CFLAGS -c kernel.c -o kernel.o
 if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
 
 echo "[14/12] Linking kernel..."
 ld -m elf_i386 -Ttext 0x10000 --oformat binary \
-   kernel.o string.o vga.o memory.o interrupt.o shell.o fs.o text.o console.o mouse.o ata.o math.o \
+   kernel.o string.o vga.o memory.o interrupt.o shell.o fs.o text.o console.o mouse.o ata.o math.o auth.o\
    -o kernel.bin -nostdlib -e _start
 if [ $? -ne 0 ]; then
     echo "Error: Linking failed!"

@@ -10,6 +10,7 @@
 #include "include/string.h"
 #include "include/console.h"
 #include "include/ata.h"
+#include "include/auth.h"
 
 void kernel_main() {
     // Initialize VGA
@@ -67,26 +68,8 @@ void kernel_main() {
     console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
     console_print_colored("Kernel ready!\n\n", COLOR_GREEN_ON_BLACK);
 
-    // Security setup
-    char pass[MAX_PASSWORD_LEN];
-    char pass_conf[MAX_PASSWORD_LEN];
-    char user[MAX_USERNAME_LEN];
-
-    console_print_colored("enter username(within 39 characters): ", COLOR_GREEN_ON_BLACK);
-    read_line_with_display(user, MAX_USERNAME_LEN);
-    strcpy(USERNAME, user);
-
-    do {
-        console_print_colored("enter root password(within 39 characters): ", COLOR_GREEN_ON_BLACK);
-        read_line_with_display(pass, MAX_PASSWORD_LEN);
-        console_print_colored("confirm password: ", COLOR_GREEN_ON_BLACK);
-        read_line_with_display(pass_conf, MAX_PASSWORD_LEN);
-        if (strcmp(pass, pass_conf) == 0) {
-            strcpy(ROOT_PASSWORD, pass_conf);
-            break;
-        }
-        console_print_colored("Passwords didn't match, please try again.\n", COLOR_YELLOW_ON_BLACK);
-    } while (strcmp(pass, pass_conf));
+    // Authentication setup (replaces old manual password entry)
+    auth_init(read_line_with_display);
 
     // Note: fs_init() already set the working directory to /a
     // No need to do it again here
