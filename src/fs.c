@@ -193,7 +193,6 @@ static void mkfs() {
     // Create Root Node
     fs_node_t* root = cache_load(FS_ROOT_ID);
     if (!root) {
-        // Need to manually set up first node in cache
         int slot = cache_find_slot();
         cache[slot].id = FS_ROOT_ID;
         cache[slot].node.id = FS_ROOT_ID;
@@ -205,64 +204,120 @@ static void mkfs() {
         cache[slot].dirty = 1;
         cache[slot].last_access = ++access_counter;
         root = &cache[slot].node;
-    } else {
-        root->id = FS_ROOT_ID;
-        root->parent_id = FS_ROOT_ID;
-        root->type = FS_TYPE_DIRECTORY;
-        strcpy(root->name, "");
-        root->size = 0;
-        root->child_count = 0;
-        cache_mark_dirty(FS_ROOT_ID);
     }
 
     save_node(FS_ROOT_ID);
 
-    // Create /a directory
-    uint32_t a_id = sb.next_free_id++;
-    sb.total_nodes++;
-    sb.used_sectors++;
+    // Helper function to create directories
+     void CREATE_DIR(const char* name, const char* description)
+    {
+        uint32_t dir_id = sb.next_free_id++;
+        sb.total_nodes++;
+        sb.used_sectors++;
+        int slot = cache_find_slot();
+        cache[slot].id = dir_id;
+        cache[slot].node.id = dir_id;
+        cache[slot].node.parent_id = FS_ROOT_ID;
+        cache[slot].node.type = FS_TYPE_DIRECTORY;
+        strcpy(cache[slot].node.name, name);
+        cache[slot].node.size = 0;
+        cache[slot].node.child_count = 0;
+        cache[slot].dirty = 1;
+        cache[slot].last_access = ++access_counter;
+        root->child_ids[root->child_count++] = dir_id;
+        cache_mark_dirty(FS_ROOT_ID);
+        save_node(dir_id);
+        console_print_colored("FS: Created ", COLOR_GREEN_ON_BLACK);
+        console_print("/");
+        console_print(name);
+        console_print(" - ");
+        console_print(description);
+        console_print("\n");
+    }
 
-    int slot = cache_find_slot();
-    cache[slot].id = a_id;
-    cache[slot].node.id = a_id;
-    cache[slot].node.parent_id = FS_ROOT_ID;
-    cache[slot].node.type = FS_TYPE_DIRECTORY;
-    strcpy(cache[slot].node.name, "a");
-    cache[slot].node.size = 0;
-    cache[slot].node.child_count = 0;
-    cache[slot].dirty = 1;
-    cache[slot].last_access = ++access_counter;
+    // Create standard Unix directories
+    CREATE_DIR("bin", "Essential user commands");
+    CREATE_DIR("boot", "Boot files (informational)");
+    CREATE_DIR("dev", "Device files (future)");
+    CREATE_DIR("etc", "System configuration");
+    CREATE_DIR("home", "User home directories");
+    CREATE_DIR("lib", "Shared libraries (future)");
+    CREATE_DIR("mnt", "Mount points");
+    CREATE_DIR("opt", "Optional software");
+    CREATE_DIR("proc", "Process info (future)");
+    CREATE_DIR("root", "Root user home");
+    CREATE_DIR("sbin", "System binaries");
+    CREATE_DIR("sys", "System info (future)");
+    CREATE_DIR("tmp", "Temporary files");
+    CREATE_DIR("usr", "User programs");
+    CREATE_DIR("var", "Variable data");
 
-    root->child_ids[root->child_count++] = a_id;
-    cache_mark_dirty(FS_ROOT_ID);
-    save_node(a_id);
-    console_print_colored("FS: Created /a directory.\n", COLOR_GREEN_ON_BLACK);
+    // Create user workspace (your /a directory)
+    CREATE_DIR("a", "User workspace");
 
-    // Create /h directory
-    uint32_t h_id = sb.next_free_id++;
-    sb.total_nodes++;
-    sb.used_sectors++;
+    // Create history directory
+    CREATE_DIR("h", "Command history");
 
-    slot = cache_find_slot();
-    cache[slot].id = h_id;
-    cache[slot].node.id = h_id;
-    cache[slot].node.parent_id = FS_ROOT_ID;
-    cache[slot].node.type = FS_TYPE_DIRECTORY;
-    strcpy(cache[slot].node.name, "h");
-    cache[slot].node.size = 0;
-    cache[slot].node.child_count = 0;
-    cache[slot].dirty = 1;
-    cache[slot].last_access = ++access_counter;
+    #undef CREATE_DIR
 
-    root->child_ids[root->child_count++] = h_id;
-    cache_mark_dirty(FS_ROOT_ID);
-    save_node(h_id);
-    console_print_colored("FS: Created /h directory.\n", COLOR_GREEN_ON_BLACK);
+    // Create system info files in /boot
+    uint32_t boot_id = fs_find_node_local_id(FS_ROOT_ID, "boot");
+    if (boot_id) {
+        // Create version file
+        if (fs_create_node(boot_id, "version", FS_TYPE_FILE)) {
+            uint32_t version_id = fs_find_node_local_id(boot_id, "version");
+            fs_node_t* version_file = fs_get_node(version_id);
+            if (version_file) {
+                char* content = (char*)version_file->padding;
+                strcpy(content, "PUNIX Kernel v1.03\n");
+                strcat(content, "Build: 2024-12-01\n");
+                strcat(content, "Architecture: x86 (32-bit)\n");
+                version_file->size = strlen(content);
+                fs_update_node(version_file);
+            }
+        }
+
+        // Create README
+        if (fs_create_node(boot_id, "README", FS_TYPE_FILE)) {
+            uint32_t readme_id = fs_find_node_local_id(boot_id, "README");
+            fs_node_t* readme_file = fs_get_node(readme_id);
+            if (readme_file) {
+                char* content = (char*)readme_file->padding;
+                strcpy(content, "Boot Directory\n");
+                strcat(content, "==============\n\n");
+                strcat(content, "This directory contains system information.\n");
+                strcat(content, "The actual bootloader and kernel are stored\n");
+                strcat(content, "in fixed disk sectors (0-60), not in the\n");
+                strcat(content, "filesystem.\n\n");
+                strcat(content, "Bootloader: Sector 0 (512 bytes)\n");
+                strcat(content, "Kernel:     Sectors 1-60 (~30 KB)\n");
+                readme_file->size = strlen(content);
+                fs_update_node(readme_file);
+            }
+        }
+    }
+
+    // Create /etc/motd (Message of the Day)
+    uint32_t etc_id = fs_find_node_local_id(FS_ROOT_ID, "etc");
+    if (etc_id) {
+        if (fs_create_node(etc_id, "motd", FS_TYPE_FILE)) {
+            uint32_t motd_id = fs_find_node_local_id(etc_id, "motd");
+            fs_node_t* motd_file = fs_get_node(motd_id);
+            if (motd_file) {
+                char* content = (char*)motd_file->padding;
+                strcpy(content, "Welcome to PUNIX!\n");
+                strcat(content, "Type 'help' for available commands.\n");
+                motd_file->size = strlen(content);
+                fs_update_node(motd_file);
+            }
+        }
+    }
 
     save_node(FS_ROOT_ID);
     save_superblock();
 
-    console_print_colored("FS: Format complete.\n", COLOR_GREEN_ON_BLACK);
+    console_print_colored("\nFS: Format complete. ", COLOR_GREEN_ON_BLACK);
+    console_print_colored("Standard directory structure created.\n", COLOR_GREEN_ON_BLACK);
 }
 
 // --- Public API ---

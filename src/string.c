@@ -30,6 +30,19 @@ void* memcpy(void* dest, const void* src, size_t n) {
 	return dest;
 }
 
+void strcat(char* dest, const char* source){
+	int i = 0, j = 0;
+	while(dest[i] != '\0'){
+		i++;
+	}
+	while(dest[j] != '\0'){
+		dest[i] = source[j];
+		i++;
+		j++;
+	}
+	dest[i] = '\0';
+}
+
 /**
  * Compares two strings.
  * @param str1 The first string.

@@ -515,6 +515,79 @@ void cmd_chpasswd() {
     auth_change_password(read_line_with_display);
 }
 
+// --- NEW: System Info Command ---
+void cmd_sysinfo() {
+    console_print_colored("=== PUNIX System Information ===\n", COLOR_GREEN_ON_BLACK);
+    console_print("\n");
+
+    // Try to read version from /boot/version
+    fs_node_t* boot_dir = fs_find_node("boot", fs_root_id);
+    if (boot_dir) {
+        uint32_t version_id = fs_find_node_local_id(boot_dir->id, "version");
+        if (version_id) {
+            fs_node_t* version_file = fs_get_node(version_id);
+            if (version_file && version_file->size > 0) {
+                char* content = (char*)version_file->padding;
+                console_print(content);
+                console_print("\n");
+            }
+        }
+    }
+
+    // Disk layout info
+    console_print_colored("Disk Layout:\n", COLOR_YELLOW_ON_BLACK);
+    console_print("  Sector 0:       Bootloader (512 bytes)\n");
+    console_print("  Sectors 1-60:   Kernel binary (~30 KB)\n");
+    console_print("  Sector 61:      Filesystem superblock\n");
+    console_print("  Sectors 62+:    Filesystem data\n");
+    console_print("\n");
+
+    // Memory info
+    uint32_t total, used, free;
+    pmm_get_stats(&total, &used, &free);
+    console_print_colored("Memory:\n", COLOR_YELLOW_ON_BLACK);
+    char num[16];
+    console_print("  Total: ");
+    int_to_str((total * PAGE_SIZE) / 1024, num);
+    console_print(num);
+    console_print(" KB\n");
+
+    // Disk info
+    uint32_t total_kb, used_kb, free_kb;
+    fs_get_disk_stats(&total_kb, &used_kb, &free_kb);
+    console_print_colored("Storage:\n", COLOR_YELLOW_ON_BLACK);
+    console_print("  Total: ");
+    int_to_str(total_kb, num);
+    console_print(num);
+    console_print(" KB\n");
+
+    console_print("\n");
+    console_print_colored("Current User: ", COLOR_YELLOW_ON_BLACK);
+    console_print(USERNAME);
+    console_print("\n");
+}
+
+// --- NEW: Show Message of the Day ---
+void cmd_motd() {
+    fs_node_t* etc_dir = fs_find_node("etc", fs_root_id);
+    if (!etc_dir) {
+        console_print_colored("Error: /etc directory not found.\n", COLOR_LIGHT_RED);
+        return;
+    }
+
+    uint32_t motd_id = fs_find_node_local_id(etc_dir->id, "motd");
+    if (motd_id == 0) {
+        console_print_colored("No message of the day.\n", COLOR_YELLOW_ON_BLACK);
+        return;
+    }
+
+    fs_node_t* motd_file = fs_get_node(motd_id);
+    if (motd_file && motd_file->size > 0) {
+        char* content = (char*)motd_file->padding;
+        console_print_colored(content, COLOR_GREEN_ON_BLACK);
+    }
+}
+
 void cmd_help() {
     console_clear_screen();
     console_print_colored("+================================================+\n", COLOR_GREEN_ON_BLACK);
@@ -534,6 +607,8 @@ void cmd_help() {
 
     console_print_colored("System Commands:\n", COLOR_YELLOW_ON_BLACK);
     console_print("  mem           - Show memory, disk, and cache stats\n");
+    console_print("  sysinfo       - Show system information\n");
+    console_print("  motd          - Show message of the day\n");
     console_print("  clear         - Clear screen\n");
     console_print("  help          - Show this help\n");
     console_print("\n");
@@ -622,6 +697,8 @@ void shell_run() {
         else if (strcmp(cmd, "sync") == 0) fs_sync();
         else if (strcmp(cmd, "chuser") == 0) cmd_chuser();
         else if (strcmp(cmd, "chpasswd") == 0) cmd_chpasswd();
+        else if (strcmp(cmd, "sysinfo") == 0) cmd_sysinfo();
+        else if (strcmp(cmd, "motd") == 0) cmd_motd();
         else {
             console_print(cmd);
             console_print_colored(": command not found\n", COLOR_YELLOW_ON_BLACK);
