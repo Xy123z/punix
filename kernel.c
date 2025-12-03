@@ -11,15 +11,20 @@
 #include "include/console.h"
 #include "include/ata.h"
 #include "include/auth.h"
+#include"include/syscall.h"
 
 void kernel_main() {
     // Initialize VGA
     console_init();
     console_clear_screen();
-
     // Initialize kernel
     console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
     console_print_colored("Initializing kernel...\n", COLOR_GREEN_ON_BLACK);
+    for (volatile int i = 0; i < 100000000; i++);
+
+     syscall_init();
+    console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
+    console_print_colored("System calls initialized.\n", COLOR_GREEN_ON_BLACK);
     for (volatile int i = 0; i < 100000000; i++);
 
     // Initialize memory

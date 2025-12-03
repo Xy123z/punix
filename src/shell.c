@@ -1,19 +1,15 @@
 /**
- * src/shell.c - Enhanced Shell implementation
- * Features: sudo, shutdown command, add with save, mem with disk stats, credential management
+ * src/shell.c - Shell implementation using System Calls
+ * All filesystem operations now go through syscall interface
  */
 #include "../include/shell.h"
+#include "../include/syscall.h"
 #include "../include/console.h"
 #include "../include/memory.h"
 #include "../include/interrupt.h"
 #include "../include/string.h"
 #include "../include/text.h"
-#include "../include/fs.h"
 #include "../include/auth.h"
-
-// --- External FS Globals (From fs.c) ---
-extern uint32_t fs_root_id;
-extern uint32_t fs_current_dir_id;
 
 // --- Shell Globals ---
 int ROOT_ACCESS_GRANTED = 0;
@@ -28,13 +24,12 @@ static char last_result[MAX_RESULT_LEN] = "";
 static int has_result = 0;
 
 static const char* current_user = USERNAME;
-static const char* kernel_name = "punix-v1.03";
+static const char* kernel_name = "punix-v1.04";
 
 // Prototypes
 void history_show();
 void history_save();
 void history_delete(int index);
-void cmd_shutdown(); // New shutdown command
 
 // Helper: Read line with visual feedback
 void read_line_with_display(char* buffer, int max_len) {
@@ -61,38 +56,20 @@ void read_line_with_display(char* buffer, int max_len) {
 }
 
 /**
- * @brief Recursively prints the path of a directory node using its ID.
+ * @brief Show shell prompt with current directory
  */
-static void print_full_path_recursive(uint32_t node_id) {
-    fs_node_t* node = fs_get_node(node_id);
-    if (!node) return;
-
-    if (node_id == fs_root_id) {
-        console_print_colored("/", COLOR_YELLOW_ON_BLACK);
-        return;
-    }
-
-    if (node->parent_id != 0 && node->parent_id != node_id) {
-        print_full_path_recursive(node->parent_id);
-    }
-
-    if (node->parent_id != fs_root_id) {
-         console_print_colored("/", COLOR_YELLOW_ON_BLACK);
-    }
-
-    console_print_colored(node->name, COLOR_YELLOW_ON_BLACK);
-}
-
 static void show_prompt() {
     console_print_colored(current_user, COLOR_GREEN_ON_BLACK);
     console_print_colored("@", COLOR_WHITE_ON_BLACK);
     console_print_colored(kernel_name, COLOR_GREEN_ON_BLACK);
     console_print_colored(":", COLOR_WHITE_ON_BLACK);
 
-    if (fs_current_dir_id == fs_root_id) {
-        console_print_colored("/", COLOR_YELLOW_ON_BLACK);
+    // Get current directory from kernel via syscall
+    char cwd[128];
+    if (sys_getcwd(cwd, 128) == 0) {
+        console_print_colored(cwd, COLOR_YELLOW_ON_BLACK);
     } else {
-        print_full_path_recursive(fs_current_dir_id);
+        console_print_colored("???", COLOR_YELLOW_ON_BLACK);
     }
 
     if (ROOT_ACCESS_GRANTED) {
@@ -109,71 +86,61 @@ void shell_init() {
     console_print("\n");
 }
 
-// --- Command Implementations ---
+// --- Command Implementations using System Calls ---
 
 void cmd_pwd() {
-    if (fs_current_dir_id == fs_root_id) {
-        console_print_colored("/", COLOR_YELLOW_ON_BLACK);
+    char cwd[128];
+    if (sys_getcwd(cwd, 128) == 0) {
+        console_print(cwd);
+        console_print("\n");
     } else {
-        print_full_path_recursive(fs_current_dir_id);
+        console_print_colored("Error: Cannot get current directory\n", COLOR_LIGHT_RED);
     }
-    console_print("\n");
 }
 
 void cmd_ls() {
-    fs_node_t* current_dir = fs_get_node(fs_current_dir_id);
+    struct dirent entries[16];
 
-    // Check history folder special case
-    if (current_dir && strcmp(current_dir->name, "h") == 0 && current_dir->parent_id == fs_root_id) {
-        history_show();
+    // Get directory entries via syscall
+    int count = sys_getdents(".", entries, 16);
+
+    if (count < 0) {
+        console_print_colored("Error: Cannot read directory\n", COLOR_LIGHT_RED);
         return;
     }
 
-    if (!current_dir) {
-        console_print_colored("Error: Invalid current directory.\n", COLOR_LIGHT_RED);
-        return;
-    }
-
-    if (current_dir->child_count == 0) {
+    if (count == 0) {
         console_print_colored("Directory is empty.\n", COLOR_YELLOW_ON_BLACK);
         return;
     }
 
     console_print_colored("Contents:\n", COLOR_YELLOW_ON_BLACK);
 
-    for (uint32_t i = 0; i < current_dir->child_count; i++) {
-        uint32_t child_id = current_dir->child_ids[i];
-        fs_node_t* child = fs_get_node(child_id);
-
-        if (child) {
-            if (child->type == FS_TYPE_DIRECTORY) {
-                console_print_colored(child->name, COLOR_YELLOW_ON_BLACK);
-                console_print_colored("/", COLOR_YELLOW_ON_BLACK);
-            } else {
-                console_print_colored(child->name, COLOR_WHITE_ON_BLACK);
-                console_print(" (");
-                char size_str[12];
-                int_to_str((int)child->size, size_str);
-                console_print(size_str);
-                console_print(" bytes)");
-            }
-            console_print("\n");
+    for (int i = 0; i < count; i++) {
+        if (entries[i].d_type == FS_TYPE_DIRECTORY) {
+            console_print_colored(entries[i].d_name, COLOR_YELLOW_ON_BLACK);
+            console_print_colored("/", COLOR_YELLOW_ON_BLACK);
+        } else {
+            console_print_colored(entries[i].d_name, COLOR_WHITE_ON_BLACK);
+            console_print(" (file)");
         }
+        console_print("\n");
     }
 }
 
 void cmd_cd(char* path) {
     if (strlen(path) == 0) return;
 
-    fs_node_t* target = fs_find_node(path, fs_current_dir_id);
+    // Special handling for root directory access
+    if (strcmp(path, "/") == 0 && !ROOT_ACCESS_GRANTED) {
+        console_print_colored("root access denied\n", COLOR_LIGHT_RED);
+        return;
+    }
 
-    if (target && target->type == FS_TYPE_DIRECTORY) {
-        if (target->id == fs_root_id && !ROOT_ACCESS_GRANTED && fs_current_dir_id != fs_root_id) {
-             console_print_colored("root access denied\n", COLOR_LIGHT_RED);
-             return;
-        }
+    // Change directory via syscall
+    int result = sys_chdir(path);
 
-        fs_current_dir_id = target->id;
+    if (result == 0) {
         console_print_colored("Changed directory.\n", COLOR_GREEN_ON_BLACK);
     } else {
         console_print_colored("cd: Directory not found or invalid.\n", COLOR_YELLOW_ON_BLACK);
@@ -186,50 +153,10 @@ void cmd_mkdir(char* path) {
         return;
     }
 
-    char temp_path[40];
-    strncpy(temp_path, path, 39);
-    temp_path[39] = '\0';
+    // Create directory via syscall
+    int result = sys_mkdir(path);
 
-    char* last_component = temp_path;
-    char* separator = 0;
-    uint32_t parent_id = fs_current_dir_id;
-
-    for (int i = 0; temp_path[i] != '\0'; i++) {
-        if (temp_path[i] == '/') {
-            separator = &temp_path[i];
-        }
-    }
-
-    char final_name[64];
-
-    if (separator) {
-        *separator = '\0';
-        last_component = separator + 1;
-
-        if (temp_path[0] == '\0' && path[0] == '/') {
-            parent_id = fs_root_id;
-        } else {
-            fs_node_t* resolved_parent = fs_find_node(temp_path, fs_current_dir_id);
-            if (!resolved_parent || resolved_parent->type != FS_TYPE_DIRECTORY) {
-                console_print_colored("mkdir: Parent directory not found.\n", COLOR_YELLOW_ON_BLACK);
-                return;
-            }
-            parent_id = resolved_parent->id;
-        }
-    }
-
-    if (strlen(last_component) == 0) {
-        console_print_colored("Error: Invalid name.\n", COLOR_YELLOW_ON_BLACK);
-        return;
-    }
-    strcpy(final_name, last_component);
-
-    if (fs_find_node_local_id(parent_id, final_name) != 0) {
-        console_print_colored("mkdir: Directory already exists.\n", COLOR_YELLOW_ON_BLACK);
-        return;
-    }
-
-    if (fs_create_node(parent_id, final_name, FS_TYPE_DIRECTORY)) {
+    if (result == 0) {
         console_print_colored("Directory created.\n", COLOR_GREEN_ON_BLACK);
     } else {
         console_print_colored("mkdir: Failed to create directory.\n", COLOR_LIGHT_RED);
@@ -242,36 +169,215 @@ void cmd_rmdir(char* path) {
         return;
     }
 
-    fs_node_t* target = fs_find_node(path, fs_current_dir_id);
+    // Remove directory via syscall
+    int result = sys_rmdir(path);
 
-    if (!target) {
-        console_print_colored("rmdir: Directory not found.\n", COLOR_YELLOW_ON_BLACK);
-        return;
-    }
-
-    if (target->type != FS_TYPE_DIRECTORY) {
-        console_print_colored("rmdir: Not a directory.\n", COLOR_YELLOW_ON_BLACK);
-        return;
-    }
-
-    if (target->id == fs_current_dir_id || target->id == fs_root_id) {
-        console_print_colored("rmdir: Cannot remove current or root directory.\n", COLOR_YELLOW_ON_BLACK);
-        return;
-    }
-
-    if (fs_delete_node(target->id) == 0) {
+    if (result == 0) {
         console_print_colored("Directory removed.\n", COLOR_GREEN_ON_BLACK);
     } else {
         console_print_colored("rmdir: Failed (is it empty?).\n", COLOR_LIGHT_RED);
     }
 }
 
-// --- NEW: Enhanced ADD command with save functionality ---
-void cmd_add(char* args) {
-    fs_node_t* cur = fs_get_node(fs_current_dir_id);
+// --- NEW: cat command (display file contents) ---
+void cmd_cat(char* filename) {
+    if (strlen(filename) == 0) {
+        console_print_colored("Usage: cat <filename>\n", COLOR_YELLOW_ON_BLACK);
+        return;
+    }
 
-    // Check if we're in /a directory
-    if (!cur || cur->parent_id != fs_root_id || strcmp(cur->name, "a") != 0) {
+    // Open file via syscall
+    int fd = sys_open(filename, O_RDONLY);
+
+    if (fd < 0) {
+        console_print_colored("cat: Cannot open file '", COLOR_LIGHT_RED);
+        console_print(filename);
+        console_print("'\n");
+        return;
+    }
+
+    // Read file contents
+    char buffer[401];
+    int bytes_read = sys_read(fd, buffer, 400);
+
+    if (bytes_read < 0) {
+        console_print_colored("cat: Error reading file\n", COLOR_LIGHT_RED);
+    } else if (bytes_read == 0) {
+        console_print_colored("(empty file)\n", COLOR_YELLOW_ON_BLACK);
+    } else {
+        buffer[bytes_read] = '\0';
+        console_print(buffer);
+        if (buffer[bytes_read - 1] != '\n') {
+            console_print("\n");
+        }
+    }
+
+    sys_close(fd);
+}
+
+// --- NEW: touch command (create empty file) ---
+void cmd_touch(char* filename) {
+    if (strlen(filename) == 0) {
+        console_print_colored("Usage: touch <filename>\n", COLOR_YELLOW_ON_BLACK);
+        return;
+    }
+
+    // Create file via syscall
+    int result = sys_create_file(filename);
+
+    if (result == 0) {
+        console_print_colored("File created: ", COLOR_GREEN_ON_BLACK);
+        console_print(filename);
+        console_print("\n");
+    } else {
+        console_print_colored("touch: Failed to create file\n", COLOR_LIGHT_RED);
+    }
+}
+
+// --- NEW: echo command (write text to file) ---
+void cmd_echo(char* args) {
+    if (strlen(args) == 0) {
+        console_print("\n");
+        return;
+    }
+
+    // Parse: echo text [filename]
+    char text[128];
+    char filename[64];
+
+    int i = 0, j = 0;
+
+    // Get text (everything until last space)
+    int last_space = -1;
+    for (int k = 0; args[k] != '\0'; k++) {
+        if (args[k] == ' ') last_space = k;
+    }
+
+    if (last_space == -1) {
+        // No filename - just print to console
+        console_print(args);
+        console_print("\n");
+        return;
+    }
+
+    // Extract text
+    for (i = 0; i < last_space; i++) {
+        text[i] = args[i];
+    }
+    text[i] = '\0';
+
+    // Extract filename
+    i = last_space + 1;
+    j = 0;
+    while (args[i] != '\0') {
+        filename[j++] = args[i++];
+    }
+    filename[j] = '\0';
+
+    if (strlen(filename) == 0) {
+        console_print(text);
+        console_print("\n");
+        return;
+    }
+
+    // Try to open file
+    int fd = sys_open(filename, O_WRONLY);
+
+    if (fd < 0) {
+        // File doesn't exist, create it
+        sys_create_file(filename);
+        fd = sys_open(filename, O_WRONLY);
+    }
+
+    if (fd < 0) {
+        console_print_colored("echo: Cannot write to file\n", COLOR_LIGHT_RED);
+        return;
+    }
+
+    // Write text
+    sys_write(fd, text, strlen(text));
+    sys_write(fd, "\n", 1);
+
+    sys_close(fd);
+
+    console_print_colored("Text written to ", COLOR_GREEN_ON_BLACK);
+    console_print(filename);
+    console_print("\n");
+}
+
+// --- NEW: cp command (copy file) ---
+void cmd_cp(char* args) {
+    char source[64];
+    char dest[64];
+
+    int i = 0, j = 0;
+
+    // Parse source
+    while (args[i] && args[i] != ' ') {
+        source[j++] = args[i++];
+    }
+    source[j] = '\0';
+
+    if (args[i] == ' ') i++;
+
+    // Parse destination
+    j = 0;
+    while (args[i]) {
+        dest[j++] = args[i++];
+    }
+    dest[j] = '\0';
+
+    if (strlen(source) == 0 || strlen(dest) == 0) {
+        console_print_colored("Usage: cp <source> <dest>\n", COLOR_YELLOW_ON_BLACK);
+        return;
+    }
+
+    // Open source
+    int fd_src = sys_open(source, O_RDONLY);
+    if (fd_src < 0) {
+        console_print_colored("cp: Cannot open source file\n", COLOR_LIGHT_RED);
+        return;
+    }
+
+    // Read source
+    char buffer[401];
+    int bytes_read = sys_read(fd_src, buffer, 400);
+    sys_close(fd_src);
+
+    if (bytes_read < 0) {
+        console_print_colored("cp: Error reading source file\n", COLOR_LIGHT_RED);
+        return;
+    }
+
+    // Create destination
+    sys_create_file(dest);
+
+    // Open destination
+    int fd_dest = sys_open(dest, O_WRONLY);
+    if (fd_dest < 0) {
+        console_print_colored("cp: Cannot create destination file\n", COLOR_LIGHT_RED);
+        return;
+    }
+
+    // Write to destination
+    int bytes_written = sys_write(fd_dest, buffer, bytes_read);
+    sys_close(fd_dest);
+
+    console_print_colored("Copied ", COLOR_GREEN_ON_BLACK);
+    char num[12];
+    int_to_str(bytes_written, num);
+    console_print(num);
+    console_print(" bytes\n");
+}
+
+// --- Standard Shell Commands ---
+
+void cmd_add(char* args) {
+    // Check if in /a directory
+    char cwd[128];
+    sys_getcwd(cwd, 128);
+
+    if (strcmp(cwd, "/a") != 0) {
         console_print_colored("Mount /a for executing this command\n", COLOR_YELLOW_ON_BLACK);
         return;
     }
@@ -300,62 +406,48 @@ void cmd_add(char* args) {
     strcpy(last_result + strlen(last_result), temp);
     has_result = 1;
 
-    // Display result
     console_print(last_result);
     console_print("\n");
 
-    // Check if save mode is enabled (args = "s")
+    // Check if save mode
     if (args && strlen(args) > 0 && args[0] == 's') {
         console_print_colored("Saving result to disk...\n", COLOR_YELLOW_ON_BLACK);
 
-        // Find or create "results.txt" file in /a
-        uint32_t a_id = fs_find_node_local_id(fs_root_id, "a");
-        if (a_id == 0) {
-            console_print_colored("Error: /a directory not found.\n", COLOR_LIGHT_RED);
-            return;
+        // Create/open results.txt via syscall
+        int fd = sys_open("results.txt", O_WRONLY);
+        if (fd < 0) {
+            sys_create_file("results.txt");
+            fd = sys_open("results.txt", O_WRONLY);
         }
 
-        // Check if results.txt exists
-        uint32_t file_id = fs_find_node_local_id(a_id, "results.txt");
-        fs_node_t* file_node = 0;
-
-        if (file_id == 0) {
-            // Create new file
-            if (fs_create_node(a_id, "results.txt", FS_TYPE_FILE)) {
-                file_id = fs_find_node_local_id(a_id, "results.txt");
-                file_node = fs_get_node(file_id);
-            } else {
-                console_print_colored("Error: Could not create results file.\n", COLOR_LIGHT_RED);
-                return;
-            }
+        if (fd >= 0) {
+            sys_write(fd, last_result, strlen(last_result));
+            sys_write(fd, "\n", 1);
+            sys_close(fd);
+            console_print_colored("Result saved to results.txt\n", COLOR_GREEN_ON_BLACK);
         } else {
-            file_node = fs_get_node(file_id);
-        }
-
-        if (file_node) {
-            // For simplicity, we'll store the result in the node's padding area
-            // (In a real FS, you'd write to data sectors)
-            int result_len = strlen(last_result);
-            if (result_len < 200) { // Safety check
-                // Copy result to padding area (acts as simple content storage)
-                for (int i = 0; i < result_len; i++) {
-                    file_node->padding[i] = last_result[i];
-                }
-                file_node->padding[result_len] = '\n';
-                file_node->padding[result_len + 1] = '\0';
-                file_node->size = result_len + 1;
-
-                // Persist to disk
-                fs_update_node(file_node);
-                console_print_colored("Result saved to /a/results.txt\n", COLOR_GREEN_ON_BLACK);
-            } else {
-                console_print_colored("Error: Result too large to save.\n", COLOR_LIGHT_RED);
-            }
+            console_print_colored("Error: Could not save result\n", COLOR_LIGHT_RED);
         }
     }
 }
 
-// --- NEW: Enhanced MEM command with disk space and cache stats ---
+void cmd_su() {
+    if (ROOT_ACCESS_GRANTED) {
+        console_print_colored("already in root mode\n", COLOR_GREEN_ON_BLACK);
+        return;
+    }
+    char pass[MAX_PASSWORD_LEN];
+    console_print_colored("enter root password: ", COLOR_GREEN_ON_BLACK);
+    read_line_with_display(pass, MAX_PASSWORD_LEN);
+    if (strcmp(pass, ROOT_PASSWORD) == 0) {
+        console_print_colored("root access granted\n", COLOR_GREEN_ON_BLACK);
+        ROOT_ACCESS_GRANTED = 1;
+        sys_chdir("/");  // Go to root via syscall
+    } else {
+        console_print_colored("root access denied\n", COLOR_YELLOW_ON_BLACK);
+    }
+}
+
 void cmd_mem() {
     console_print_colored("=== Memory Statistics ===\n", COLOR_GREEN_ON_BLACK);
 
@@ -375,7 +467,7 @@ void cmd_mem() {
     console_print("\n");
     console_print_colored("=== Disk Statistics ===\n", COLOR_GREEN_ON_BLACK);
 
-    // Get real-time disk statistics from filesystem
+    // Get disk stats via kernel function (not syscall - informational only)
     uint32_t total_disk_kb, used_disk_kb, free_disk_kb;
     fs_get_disk_stats(&total_disk_kb, &used_disk_kb, &free_disk_kb);
 
@@ -386,7 +478,7 @@ void cmd_mem() {
     console_print("\n");
     console_print_colored("=== Filesystem Cache ===\n", COLOR_GREEN_ON_BLACK);
 
-    // Get cache statistics
+    // Get cache stats
     uint32_t cache_size, cached_nodes, dirty_nodes;
     fs_get_cache_stats(&cache_size, &cached_nodes, &dirty_nodes);
 
@@ -398,43 +490,71 @@ void cmd_mem() {
     console_print("Cache Usage:   "); int_to_str(cache_usage, num); console_print(num); console_print("%\n");
 }
 
-void cmd_su() {
-    if (ROOT_ACCESS_GRANTED) {
-        console_print_colored("already in root mode\n", COLOR_GREEN_ON_BLACK);
-        return;
-    }
-    char pass[MAX_PASSWORD_LEN];
-    console_print_colored("enter root password: ", COLOR_GREEN_ON_BLACK);
-    read_line_with_display(pass, MAX_PASSWORD_LEN);
-    if (strcmp(pass, ROOT_PASSWORD) == 0) {
-        console_print_colored("root access granted\n", COLOR_GREEN_ON_BLACK);
-        ROOT_ACCESS_GRANTED = 1;
-        fs_current_dir_id = fs_root_id; // Go to root
+void cmd_sysinfo() {
+    console_print_colored("=== PUNIX System Information ===\n", COLOR_GREEN_ON_BLACK);
+    console_print("\n");
+
+    // Try to read version from /boot/version via syscall
+    int fd = sys_open("/boot/version", O_RDONLY);
+    if (fd >= 0) {
+        char buffer[128];
+        int bytes = sys_read(fd, buffer, 127);
+        if (bytes > 0) {
+            buffer[bytes] = '\0';
+            console_print(buffer);
+        }
+        sys_close(fd);
+        console_print("\n");
     } else {
-        console_print_colored("root access denied\n", COLOR_YELLOW_ON_BLACK);
+        console_print("PUNIX Kernel v1.04\n\n");
     }
+
+    // Disk layout info
+    console_print_colored("Disk Layout:\n", COLOR_YELLOW_ON_BLACK);
+    console_print("  Sector 0:       Bootloader (512 bytes)\n");
+    console_print("  Sectors 1-60:   Kernel binary (~30 KB)\n");
+    console_print("  Sector 61:      Filesystem superblock\n");
+    console_print("  Sectors 62+:    Filesystem data\n");
+    console_print("\n");
+
+    console_print_colored("Current User: ", COLOR_YELLOW_ON_BLACK);
+    console_print(USERNAME);
+    console_print("\n");
 }
 
-// --- NEW: SUDO command for temporary privilege escalation ---
+void cmd_motd() {
+    int fd = sys_open("/etc/motd", O_RDONLY);
+    if (fd < 0) {
+        console_print_colored("No message of the day.\n", COLOR_YELLOW_ON_BLACK);
+        return;
+    }
+
+    char buffer[256];
+    int bytes = sys_read(fd, buffer, 255);
+    if (bytes > 0) {
+        buffer[bytes] = '\0';
+        console_print_colored(buffer, COLOR_GREEN_ON_BLACK);
+    }
+    sys_close(fd);
+}
+
 void cmd_sudo(char* args) {
     if (strlen(args) == 0) {
         console_print_colored("Usage: sudo <command>\n", COLOR_YELLOW_ON_BLACK);
         return;
     }
 
-    // Parse the command after sudo
+    // Parse command
     char cmd[40];
     char cmd_args[40];
     int i = 0;
 
-    // Extract command
     while (args[i] && args[i] != ' ') {
         cmd[i] = args[i];
         i++;
     }
     cmd[i] = '\0';
 
-    // Extract arguments
     int j = 0;
     if (args[i] == ' ') {
         i++;
@@ -445,11 +565,11 @@ void cmd_sudo(char* args) {
     }
     cmd_args[j] = '\0';
 
-    // Check if it's a privileged command
+    // Check if privileged command
     if (strcmp(cmd, "shutdown") != 0 &&
         strcmp(cmd, "chuser") != 0 &&
         strcmp(cmd, "chpasswd") != 0) {
-        console_print_colored("sudo: only 'shutdown', 'chuser', and 'chpasswd' commands are supported\n", COLOR_YELLOW_ON_BLACK);
+        console_print_colored("sudo: only 'shutdown', 'chuser', and 'chpasswd' are supported\n", COLOR_YELLOW_ON_BLACK);
         return;
     }
 
@@ -461,7 +581,6 @@ void cmd_sudo(char* args) {
     read_line_with_display(pass, MAX_PASSWORD_LEN);
 
     if (strcmp(pass, ROOT_PASSWORD) == 0) {
-        // Execute command with temporary privilege
         if (strcmp(cmd, "shutdown") == 0) {
             cmd_shutdown();
         } else if (strcmp(cmd, "chuser") == 0) {
@@ -474,7 +593,6 @@ void cmd_sudo(char* args) {
     }
 }
 
-// --- NEW: Shutdown command (requires root) ---
 void cmd_shutdown() {
     if (!ROOT_ACCESS_GRANTED) {
         console_print_colored("shutdown: permission denied (try 'sudo shutdown')\n", COLOR_LIGHT_RED);
@@ -485,107 +603,25 @@ void cmd_shutdown() {
     console_print_colored("SHUTTING DOWN SYSTEM...\n", COLOR_LIGHT_RED);
     console_print_colored("Goodbye!\n", COLOR_GREEN_ON_BLACK);
 
-    // QEMU shutdown via ACPI
+    // QEMU shutdown
     __asm__ volatile("outb %0, %1" : : "a"((uint8_t)0x00), "Nd"((uint16_t)0x604));
-
-    // Alternative shutdown methods if ACPI fails
-    __asm__ volatile("outw %0, %1" : : "a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
-
-    // If all else fails, halt
     while(1) __asm__ volatile("hlt");
 }
 
-// --- NEW: Change Username Command ---
 void cmd_chuser() {
     if (!ROOT_ACCESS_GRANTED) {
         console_print_colored("chuser: permission denied (try 'sudo chuser')\n", COLOR_LIGHT_RED);
         return;
     }
-
     auth_change_username(read_line_with_display);
 }
 
-// --- NEW: Change Password Command ---
 void cmd_chpasswd() {
     if (!ROOT_ACCESS_GRANTED) {
         console_print_colored("chpasswd: permission denied (try 'sudo chpasswd')\n", COLOR_LIGHT_RED);
         return;
     }
-
     auth_change_password(read_line_with_display);
-}
-
-// --- NEW: System Info Command ---
-void cmd_sysinfo() {
-    console_print_colored("=== PUNIX System Information ===\n", COLOR_GREEN_ON_BLACK);
-    console_print("\n");
-
-    // Try to read version from /boot/version
-    fs_node_t* boot_dir = fs_find_node("boot", fs_root_id);
-    if (boot_dir) {
-        uint32_t version_id = fs_find_node_local_id(boot_dir->id, "version");
-        if (version_id) {
-            fs_node_t* version_file = fs_get_node(version_id);
-            if (version_file && version_file->size > 0) {
-                char* content = (char*)version_file->padding;
-                console_print(content);
-                console_print("\n");
-            }
-        }
-    }
-
-    // Disk layout info
-    console_print_colored("Disk Layout:\n", COLOR_YELLOW_ON_BLACK);
-    console_print("  Sector 0:       Bootloader (512 bytes)\n");
-    console_print("  Sectors 1-60:   Kernel binary (~30 KB)\n");
-    console_print("  Sector 61:      Filesystem superblock\n");
-    console_print("  Sectors 62+:    Filesystem data\n");
-    console_print("\n");
-
-    // Memory info
-    uint32_t total, used, free;
-    pmm_get_stats(&total, &used, &free);
-    console_print_colored("Memory:\n", COLOR_YELLOW_ON_BLACK);
-    char num[16];
-    console_print("  Total: ");
-    int_to_str((total * PAGE_SIZE) / 1024, num);
-    console_print(num);
-    console_print(" KB\n");
-
-    // Disk info
-    uint32_t total_kb, used_kb, free_kb;
-    fs_get_disk_stats(&total_kb, &used_kb, &free_kb);
-    console_print_colored("Storage:\n", COLOR_YELLOW_ON_BLACK);
-    console_print("  Total: ");
-    int_to_str(total_kb, num);
-    console_print(num);
-    console_print(" KB\n");
-
-    console_print("\n");
-    console_print_colored("Current User: ", COLOR_YELLOW_ON_BLACK);
-    console_print(USERNAME);
-    console_print("\n");
-}
-
-// --- NEW: Show Message of the Day ---
-void cmd_motd() {
-    fs_node_t* etc_dir = fs_find_node("etc", fs_root_id);
-    if (!etc_dir) {
-        console_print_colored("Error: /etc directory not found.\n", COLOR_LIGHT_RED);
-        return;
-    }
-
-    uint32_t motd_id = fs_find_node_local_id(etc_dir->id, "motd");
-    if (motd_id == 0) {
-        console_print_colored("No message of the day.\n", COLOR_YELLOW_ON_BLACK);
-        return;
-    }
-
-    fs_node_t* motd_file = fs_get_node(motd_id);
-    if (motd_file && motd_file->size > 0) {
-        char* content = (char*)motd_file->padding;
-        console_print_colored(content, COLOR_GREEN_ON_BLACK);
-    }
 }
 
 void cmd_help() {
@@ -601,6 +637,10 @@ void cmd_help() {
     console_print("  pwd           - Show current path\n");
     console_print("  mkdir [name]  - Create directory\n");
     console_print("  rmdir [name]  - Remove empty directory\n");
+    console_print("  cat [file]    - Display file contents\n");
+    console_print("  touch [file]  - Create empty file\n");
+    console_print("  echo [text] [file] - Write text to file\n");
+    console_print("  cp [src] [dst] - Copy file\n");
     console_print("  text [file]   - Open text editor\n");
     console_print("  sync          - Flush cache to disk\n");
     console_print("\n");
@@ -633,27 +673,19 @@ void cmd_clear() {
     shell_init();
 }
 
-// --- UPDATED: Exit command now only exits root mode ---
 void cmd_exit() {
     if (ROOT_ACCESS_GRANTED) {
         ROOT_ACCESS_GRANTED = 0;
         console_print_colored("Exited root mode\n", COLOR_GREEN_ON_BLACK);
-
-        // Return to /a directory
-        uint32_t a_id = fs_find_node_local_id(fs_root_id, "a");
-        if (a_id != 0) {
-            fs_current_dir_id = a_id;
-        } else {
-            fs_current_dir_id = fs_root_id;
-        }
+        sys_chdir("/a");  // Return to /a via syscall
     } else {
         console_print_colored("Not in root mode. Use 'shutdown' to power off.\n", COLOR_YELLOW_ON_BLACK);
     }
 }
 
-// History Functions (Stubs for now)
+// History Functions (Stubs)
 void history_save() {
-    console_print_colored("History save not available in this version.\n", COLOR_YELLOW_ON_BLACK);
+    console_print_colored("History save not available.\n", COLOR_YELLOW_ON_BLACK);
 }
 void history_delete(int index) { console_print("Not implemented.\n"); }
 void history_show() { console_print("Not implemented.\n"); }
@@ -679,15 +711,21 @@ void shell_run() {
         }
         args[j] = '\0';
 
-        // Command routing
+        // Command routing using syscalls
         if (strcmp(cmd, "ls") == 0) cmd_ls();
         else if (strcmp(cmd, "pwd") == 0) cmd_pwd();
         else if (strcmp(cmd, "cd") == 0) cmd_cd(args);
         else if (strcmp(cmd, "mkdir") == 0) cmd_mkdir(args);
         else if (strcmp(cmd, "rmdir") == 0) cmd_rmdir(args);
+        else if (strcmp(cmd, "cat") == 0) cmd_cat(args);
+        else if (strcmp(cmd, "touch") == 0) cmd_touch(args);
+        else if (strcmp(cmd, "echo") == 0) cmd_echo(args);
+        else if (strcmp(cmd, "cp") == 0) cmd_cp(args);
         else if (strcmp(cmd, "help") == 0) cmd_help();
         else if (strcmp(cmd, "clear") == 0) cmd_clear();
         else if (strcmp(cmd, "mem") == 0) cmd_mem();
+        else if (strcmp(cmd, "sysinfo") == 0) cmd_sysinfo();
+        else if (strcmp(cmd, "motd") == 0) cmd_motd();
         else if (strcmp(cmd, "root") == 0) cmd_su();
         else if (strcmp(cmd, "exit") == 0) cmd_exit();
         else if (strcmp(cmd, "add") == 0) cmd_add(args);
@@ -697,8 +735,6 @@ void shell_run() {
         else if (strcmp(cmd, "sync") == 0) fs_sync();
         else if (strcmp(cmd, "chuser") == 0) cmd_chuser();
         else if (strcmp(cmd, "chpasswd") == 0) cmd_chpasswd();
-        else if (strcmp(cmd, "sysinfo") == 0) cmd_sysinfo();
-        else if (strcmp(cmd, "motd") == 0) cmd_motd();
         else {
             console_print(cmd);
             console_print_colored(": command not found\n", COLOR_YELLOW_ON_BLACK);

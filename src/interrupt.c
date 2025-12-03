@@ -2,7 +2,7 @@
 #include "../include/interrupt.h"
 #include "../include/types.h" // For uint8_t, uint16_t, uint32_t
 #include "../include/console.h"
-// --- Scrolling Scan Codes ---
+#include "../include/syscall.h"// --- Scrolling Scan Codes ---
 #define SC_ARROW_UP   0x48
 #define SC_ARROW_DOWN 0x50
 // ----------------------------
@@ -187,7 +187,7 @@ void idt_init() {
 
     // Set keyboard interrupt (IRQ1 = interrupt 33)
     idt_set_gate(33, (uint32_t)keyboard_interrupt_handler, 0x08, 0x8E);
-
+    idt_set_gate(0x80, (uint32_t)syscall_interrupt_wrapper, 0x08, 0x8E);
     __asm__ volatile("lidt %0" : : "m"(idtp));
 }
 

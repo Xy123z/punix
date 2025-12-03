@@ -14,6 +14,15 @@ echo ""
 CFLAGS="-m32 -Iinclude -ffreestanding -nostdlib -fno-pie -fno-pic -fno-stack-protector -O2"
 
 # Compile each module
+
+echo "[6/12] Compiling shell.c..."
+gcc $CFLAGS -c src/shell.c -o shell.o
+if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
+
+echo "[2/12] Compiling syscall.c..."
+gcc $CFLAGS -c src/syscall.c -o syscall.o
+if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
+
 echo "[2/12] Compiling string.c..."
 gcc $CFLAGS -c src/string.c -o string.o
 if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
@@ -69,7 +78,7 @@ if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
 
 echo "[14/12] Linking kernel..."
 ld -m elf_i386 -Ttext 0x10000 --oformat binary \
-   kernel.o string.o vga.o memory.o interrupt.o shell.o fs.o text.o console.o mouse.o ata.o math.o auth.o\
+   kernel.o string.o vga.o memory.o interrupt.o shell.o fs.o text.o console.o mouse.o ata.o math.o auth.o syscall.o\
    -o kernel.bin -nostdlib -e _start
 if [ $? -ne 0 ]; then
     echo "Error: Linking failed!"
