@@ -123,6 +123,23 @@ __asm__(
     "   iret\n"
 );
 
+// Page fault handler wrapper
+extern void page_fault_interrupt_handler();
+__asm__(
+    ".global page_fault_interrupt_handler\n"
+    "page_fault_interrupt_handler:\n"
+    "   pusha\n"
+    "   mov %cr2, %eax\n"  // Get faulting address from CR2
+    "   push %eax\n"        // Push faulting address (Arg2)
+    "   mov 36(%esp), %eax\n" // Get error code (pushed by CPU, at ESP+32+4)
+    "   push %eax\n"        // Push error code (Arg1)
+    "   call page_fault_handler\n"
+    "   add $8, %esp\n"     // Clean up args
+    "   popa\n"
+    "   add $4, %esp\n"     // Remove error code pushed by CPU
+    "   iret\n"
+);
+
 // Check if keyboard buffer has data
 int keyboard_has_data() {
     return kbd_read_pos != kbd_write_pos;
@@ -185,6 +202,9 @@ void idt_init() {
         idt_set_gate(i, 0, 0, 0);
     }
 
+    // Set exception handlers
+    idt_set_gate(14, (uint32_t)page_fault_interrupt_handler, 0x08, 0x8E);  // Page fault
+    
     // Set keyboard interrupt (IRQ1 = interrupt 33)
     idt_set_gate(33, (uint32_t)keyboard_interrupt_handler, 0x08, 0x8E);
     idt_set_gate(0x80, (uint32_t)syscall_interrupt_wrapper, 0x08, 0x8E);

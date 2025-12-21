@@ -2,6 +2,7 @@
 #include "include/types.h"
 #include "include/vga.h"
 #include "include/memory.h"
+#include "include/paging.h"
 #include "include/interrupt.h"
 #include "include/shell.h"
 #include "include/text.h"
@@ -11,7 +12,7 @@
 #include "include/console.h"
 #include "include/ata.h"
 #include "include/auth.h"
-#include"include/syscall.h"
+#include "include/syscall.h"
 
 void kernel_main() {
     // Initialize VGA
@@ -33,11 +34,22 @@ void kernel_main() {
     pmm_init();
     heap_init();
 
+    // Initialize paging subsystem
+    console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
+    console_print_colored("Initializing page tables...\n", COLOR_YELLOW_ON_BLACK);
+    paging_init();
+    for (volatile int i = 0; i < 100000000; i++);
+
+    // Enable paging
+    paging_enable();
+    for (volatile int i = 0; i < 100000000; i++);
+
     // Initialize ATA before filesystem
     ata_init();
 
     // Initialize filesystem (will create /a and /h on first boot and set cwd to /a)
     fs_init();
+    syscall_set_cwd(fs_current_dir_id); // Sync syscall CWD with FS
     for (volatile int i = 0; i < 100000000; i++);
 
     // Test memory
@@ -74,6 +86,8 @@ void kernel_main() {
     console_print_colored("Kernel ready!\n\n", COLOR_GREEN_ON_BLACK);
 
     // Authentication setup (replaces old manual password entry)
+    // auth_init(read_line_with_display);
+    console_print("launching authentication system\n");
     auth_init(read_line_with_display);
 
     // Note: fs_init() already set the working directory to /a
@@ -83,8 +97,11 @@ void kernel_main() {
     for (volatile int i = 0; i < 100000000; i++);
 
     // Start shell
+    console_print("DEBUG: Clearing screen...\n");
     console_clear_screen();
+    console_print("DEBUG: shell_init()...\n");
     shell_init();
+    console_print("DEBUG: shell_run()...\n");
     shell_run();
 
     // Should never reach here

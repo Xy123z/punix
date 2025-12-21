@@ -166,6 +166,32 @@ void int_to_str(int num, char* str) {
 }
 
 /**
+ * Converts an integer to hexadecimal string
+ */
+void int_to_hex(uint32_t num, char* str) {
+	const char hex_chars[] = "0123456789ABCDEF";
+	int i = 0;
+	
+	if (num == 0) {
+		str[i++] = '0';
+	} else {
+		char temp[9]; // Max 8 hex digits + null
+		int j = 0;
+		
+		while (num > 0) {
+			temp[j++] = hex_chars[num % 16];
+			num /= 16;
+		}
+		
+		while (j > 0) {
+			str[i++] = temp[--j];
+		}
+	}
+	
+	str[i] = '\0';
+}
+
+/**
  * Converts a string to an integer.
  */
 int str_to_int(const char* str) {

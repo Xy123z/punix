@@ -32,7 +32,7 @@ typedef struct fs_node {
     uint32_t size;              // Size in bytes
     uint32_t child_count;
     uint32_t child_ids[FS_MAX_CHILDREN];
-    uint8_t  padding[300];      // Padding to ensure struct size ~512 bytes
+    uint8_t  padding[364];      // Padding to ensure struct size = 512 bytes (Sector Size)
 } fs_node_t;
 
 // --- Global State ---

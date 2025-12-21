@@ -34,14 +34,13 @@ void syscall_init() {
     for (int i = 0; i < MAX_FDS; i++) {
         fd_table[i].in_use = 0;
     }
+    
+    // Default to root if not set
+    current_cwd = fs_root_id;
+}
 
-    // Set initial working directory to /a
-    fs_node_t* dir_a = fs_find_node("a", fs_root_id);
-    if (dir_a) {
-        current_cwd = dir_a->id;
-    } else {
-        current_cwd = fs_root_id;
-    }
+void syscall_set_cwd(uint32_t id) {
+    current_cwd = id;
 }
 
 /**
@@ -83,10 +82,21 @@ static void free_fd(int fd) {
  *
  * Return value in EAX
  */
-void syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
+uint32_t syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
                      uint32_t edx, uint32_t esi, uint32_t edi) {
     uint32_t syscall_num = eax;
     uint32_t ret = 0;
+
+    // DEBUG: Trace syscalls
+    if (syscall_num != SYS_PRINT) { // Don't trace print to avoid recursion loop
+       console_print("SC: ");
+       char num[12];
+       int_to_str(syscall_num, num);
+       console_print(num);
+       console_print(" EAX="); int_to_hex(eax, num); console_print(num);
+       console_print(" EBX="); int_to_hex(ebx, num); console_print(num);
+       console_print("\n");
+    }
 
     switch (syscall_num) {
         case SYS_PRINT: {
@@ -201,18 +211,32 @@ void syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
 
             // Build path string
             // For simplicity, just return the current directory name
-            fs_node_t* cwd = fs_get_node(current_cwd);
-            if (cwd) {
-                if (current_cwd == fs_root_id) {
+            
+            // DEBUG: Trace CWD ID and Pointer
+            console_print("CWD ID: ");
+            char n[12];
+            int_to_str(current_cwd, n);
+            console_print(n);
+            
+            // fs_node_t* cwd = fs_get_node(current_cwd);
+            
+            console_print(" SKIPPING FS LOOKUP\n");
+            // int_to_hex((uint32_t)cwd, n);
+            // console_print(n);
+            // console_print("\n");
+
+            // if (cwd) {
+                // FORCE ROOT for testing
+                // if (current_cwd == fs_root_id) {
                     strcpy(buf, "/");
-                } else {
-                    strcpy(buf, "/");
-                    strcat(buf, cwd->name);
-                }
+                // } else {
+                //     strcpy(buf, "/");
+                //     strcat(buf, cwd->name);
+                // }
                 ret = 0;
-            } else {
-                ret = -1;
-            }
+            // } else {
+            //     ret = -1;
+            // }
             break;
         }
 
@@ -329,24 +353,42 @@ void syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
             break;
     }
 
-    // Return value is passed back in EAX
-    // This will be handled by the assembly wrapper
-    __asm__ volatile("mov %0, %%eax" : : "r"(ret));
+    // Return value naturally goes in EAX via C calling convention
+    return ret;
 }
 
 // Assembly wrapper for system call interrupt
+// CRITICAL: We must NOT save/restore EAX because it holds the return value
 __asm__(
     ".global syscall_interrupt_wrapper\n"
     "syscall_interrupt_wrapper:\n"
-    "   pusha\n"                    // Save all registers
-    "   push %edi\n"                // Push args in reverse order
-    "   push %esi\n"
-    "   push %edx\n"
-    "   push %ecx\n"
+    // Save registers that we'll clobber (but NOT EAX - it will hold return value)
     "   push %ebx\n"
-    "   push %eax\n"
-    "   call syscall_handler\n"
-    "   add $24, %esp\n"            // Clean up stack (6 args * 4 bytes)
-    "   popa\n"                     // Restore registers (includes EAX with return value)
-    "   iret\n"
+    "   push %ecx\n"
+    "   push %edx\n"
+    "   push %esi\n"
+    "   push %edi\n"
+    "   push %ebp\n"
+    
+    // Push arguments for syscall_handler in REVERSE order (cdecl convention)
+    // syscall_handler(eax, ebx, ecx, edx, esi, edi)
+    "   push %edi\n"                // arg6
+    "   push %esi\n"                // arg5
+    "   push %edx\n"                // arg4
+    "   push %ecx\n"                // arg3
+    "   push %ebx\n"                // arg2
+    "   push %eax\n"                // arg1 (syscall number)
+    
+    "   call syscall_handler\n"     // Call C handler, return value in EAX
+    "   add $24, %esp\n"            // Clean up 6 arguments (6 * 4 = 24 bytes)
+    
+    // Restore registers (but NOT EAX - it has the return value!)
+    "   pop %ebp\n"
+    "   pop %edi\n"
+    "   pop %esi\n"
+    "   pop %edx\n"
+    "   pop %ecx\n"
+    "   pop %ebx\n"
+    
+    "   iret\n"                     // Return to user code with EAX = return value
 );

@@ -39,7 +39,8 @@ struct dirent {
 
 // Kernel-side functions
 void syscall_init();
-void syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
+void syscall_set_cwd(uint32_t id);
+uint32_t syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
                      uint32_t edx, uint32_t esi, uint32_t edi);
 extern void syscall_interrupt_wrapper();
 

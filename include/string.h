@@ -16,6 +16,7 @@ char* strchr(const char* s, int c);
 int strlen(const char* str);
 void strcat(char* dest, const char* source);
 void int_to_str(int num, char* str);
+void int_to_hex(uint32_t num, char* str);
 int str_to_int(const char* str);
 
 #endif // STRING_H
