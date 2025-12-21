@@ -7,7 +7,7 @@
 
 // Memory configuration
 #define PAGE_SIZE 4096
-#define KERNEL_START 0x100000
+#define KERNEL_START 0x10000
 #define KERNEL_END   0x400000
 #define MEMORY_END   0x2000000
 #define TOTAL_PAGES ((MEMORY_END - KERNEL_END) / PAGE_SIZE)
