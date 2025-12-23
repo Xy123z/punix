@@ -5,35 +5,52 @@
 // --- Constants ---
 #define FS_TYPE_FILE        0
 #define FS_TYPE_DIRECTORY   1
-#define FS_MAX_NAME         64
-#define FS_MAX_CHILDREN     16
+#define FS_MAX_NAME         60
+#define FS_MAX_INODES       256
+#define SECTOR_SIZE         512
 
-// --- CRITICAL FIX: Correct sector numbers ---
-// Disk Layout:
-// LBA 0: Bootloader (CHS Sector 1)
-// LBA 1-60: Kernel (CHS Sectors 2-61)
-// LBA 61: Filesystem Superblock (CHS Sector 62)
-// LBA 62+: Node Table (CHS Sector 63+)
-#define FS_SUPERBLOCK_SECTOR    61  // Superblock at LBA 61
-#define FS_NODE_TABLE_START     62  // Node table starts at LBA 62
-// -----------------------------------------------
+// --- New Disk Layout ---
+#define FS_SUPERBLOCK_SECTOR    61
+#define FS_INODE_BITMAP_SECTOR  62
+#define FS_BLOCK_BITMAP_START   63
+#define FS_BLOCK_BITMAP_COUNT   25
+#define FS_INODE_TABLE_START    88
+#define FS_INODE_TABLE_COUNT    64
+#define FS_DATA_BLOCKS_START    152
+// -----------------------
 
 // --- Data Structures ---
+
 /**
- * @brief The Inode structure representing a file or directory.
- * Sized to fit comfortably within a 512-byte ATA sector.
- * (Approx 152 bytes used + padding).
+ * @brief 128-byte Inode structure
  */
-typedef struct fs_node {
-    uint32_t id;
+typedef struct inode {
+    uint32_t id;                // 0 if free
     uint32_t parent_id;
-    uint8_t  type;              // FS_TYPE_FILE or FS_TYPE_DIRECTORY
-    char     name[FS_MAX_NAME]; // Fixed name buffer
-    uint32_t size;              // Size in bytes
-    uint32_t child_count;
-    uint32_t child_ids[FS_MAX_CHILDREN];
-    uint8_t  padding[364];      // Padding to ensure struct size = 512 bytes (Sector Size)
-} fs_node_t;
+    uint8_t  type;              // FILE or DIRECTORY
+    uint32_t mode;              // Mode bits (rwxrwxrwx)
+    uint16_t link_count;
+    uint32_t uid;
+    uint32_t gid;
+    uint32_t size;              // File size in bytes
+    uint32_t block_count;       // Number of blocks allocated
+    uint32_t blocks[12];        // Direct pointers
+    uint32_t indirect_block;    // Indirect pointer
+    uint32_t atime;
+    uint32_t mtime;
+    uint32_t ctime;
+    uint8_t  padding[32];       // Pad to 128 bytes
+} inode_t;
+
+typedef inode_t fs_node_t;      // Compatibility
+
+/**
+ * @brief 64-byte Directory Entry
+ */
+typedef struct {
+    uint32_t inode_id;
+    char     name[FS_MAX_NAME];
+} fs_dirent_t;
 
 // --- Global State ---
 // These allow the shell to know "where" it is globally
@@ -102,8 +119,24 @@ void fs_get_disk_stats(uint32_t* total_kb, uint32_t* used_kb, uint32_t* free_kb)
 void fs_get_cache_stats(uint32_t* cache_size, uint32_t* cached_nodes, uint32_t* dirty_nodes);
 
 /**
+ * @brief Retrieves the name of an inode by looking it up in its parent.
+ * @return 1 on success, 0 on failure.
+ */
+int fs_get_inode_name(uint32_t id, char* buffer);
+
+/**
+ * @brief Reads data from a node's data blocks.
+ */
+int fs_read(inode_t* node, uint32_t offset, uint32_t size, uint8_t* buffer);
+
+/**
+ * @brief Writes data to a node's data blocks.
+ * Automatically allocates blocks as needed.
+ */
+int fs_write(inode_t* node, uint32_t offset, uint32_t size, uint8_t* buffer);
+
+/**
  * @brief Flushes all dirty cache entries to disk.
- * Call this periodically or before shutdown to ensure data persistence.
  */
 void fs_sync();
 

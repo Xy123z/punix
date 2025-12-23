@@ -14,11 +14,8 @@
 #define CTRL_S 0x13
 #define CTRL_X 0x18
 
-// Helper macro to access the content area of the node (using the padding)
-// We treat the padding bytes as the raw file content storage.
-#define NODE_CONTENT(node) ((char*)((node)->padding))
-// Calculate max safe size based on the struct definition
-#define MAX_EDITOR_SIZE (sizeof(((fs_node_t*)0)->padding) - 1)
+// Max safe size for the editor buffer
+#define MAX_EDITOR_SIZE 511
 
 // --- Helper Functions ---
 
@@ -70,14 +67,13 @@ void text_editor(const char* edit_filename) {
                 return;
             }
 
-            // Load content from the node's internal storage
-            strcpy(initial_filename, target_node->name);
-            char* content = NODE_CONTENT(target_node);
-
-            // Safety copy
-            strncpy(editor_buffer, content, MAX_EDITOR_SIZE);
-            editor_buffer[MAX_EDITOR_SIZE] = '\0';
-            current_len = strlen(editor_buffer);
+            // Load content using the new FS API
+            fs_get_inode_name(target_node->id, initial_filename);
+            
+            // Read from data blocks
+            int read = fs_read(target_node, 0, MAX_EDITOR_SIZE, (uint8_t*)editor_buffer);
+            editor_buffer[read] = '\0';
+            current_len = read;
         } else {
             // New file setup
             strncpy(initial_filename, edit_filename, FS_MAX_NAME - 1);
@@ -166,15 +162,8 @@ void text_editor(const char* edit_filename) {
              return;
         }
 
-        // Write buffer to node padding
-        char* node_storage = NODE_CONTENT(final_node);
-        memset(node_storage, 0, sizeof(final_node->padding)); // Clear old
-        strncpy(node_storage, editor_buffer, current_len);
-
-        final_node->size = current_len;
-
-        // Persist to Disk
-        if (fs_update_node(final_node)) {
+        // Write buffer to data blocks
+        if (fs_write(final_node, 0, current_len, (uint8_t*)editor_buffer)) {
             console_print_colored("File updated successfully.\n", COLOR_GREEN_ON_BLACK);
         } else {
             console_print_colored("Error writing to disk.\n", COLOR_LIGHT_RED);
@@ -190,14 +179,12 @@ void text_editor(const char* edit_filename) {
             final_node = fs_get_node(new_id);
 
             if (final_node) {
-                // 3. Fill Content
-                char* node_storage = NODE_CONTENT(final_node);
-                strncpy(node_storage, editor_buffer, current_len);
-                final_node->size = current_len;
-
-                // 4. Persist
-                fs_update_node(final_node);
-                console_print_colored("File created and saved.\n", COLOR_GREEN_ON_BLACK);
+                // 3. Fill Content using new API
+                if (fs_write(final_node, 0, current_len, (uint8_t*)editor_buffer)) {
+                    console_print_colored("File created and saved.\n", COLOR_GREEN_ON_BLACK);
+                } else {
+                    console_print_colored("Error writing content to disk.\n", COLOR_LIGHT_RED);
+                }
             } else {
                 console_print_colored("Error retrieving new file handle.\n", COLOR_LIGHT_RED);
             }

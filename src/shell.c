@@ -10,7 +10,8 @@
 #include "../include/text.h"
 #include "../include/fs.h"
 #include "../include/auth.h"
-#include"../include/syscall.h"
+#include "../include/ata.h"
+#include "../include/syscall.h"
 // --- External FS Globals (From fs.c) ---
 extern uint32_t fs_root_id;
 extern uint32_t fs_current_dir_id;
@@ -80,7 +81,10 @@ static void print_full_path_recursive(uint32_t node_id) {
          console_print_colored("/", COLOR_YELLOW_ON_BLACK);
     }
 
-    console_print_colored(node->name, COLOR_YELLOW_ON_BLACK);
+    char name[FS_MAX_NAME];
+    if (fs_get_inode_name(node_id, name)) {
+        console_print_colored(name, COLOR_YELLOW_ON_BLACK);
+    }
 }
 
 static void show_prompt() {
@@ -121,44 +125,48 @@ void cmd_pwd() {
 }
 
 void cmd_ls() {
-    fs_node_t* current_dir = fs_get_node(fs_current_dir_id);
+    inode_t* current_dir = fs_get_node(fs_current_dir_id);
+    if (!current_dir) return;
 
-    // Check history folder special case
-    if (current_dir && strcmp(current_dir->name, "h") == 0 && current_dir->parent_id == fs_root_id) {
-        history_show();
-        return;
-    }
-
-    if (!current_dir) {
-        console_print_colored("Error: Invalid current directory.\n", COLOR_LIGHT_RED);
-        return;
-    }
-
-    if (current_dir->child_count == 0) {
-        console_print_colored("Directory is empty.\n", COLOR_YELLOW_ON_BLACK);
+    if (current_dir->type != FS_TYPE_DIRECTORY) {
+        console_print_colored("Error: Not a directory.\n", COLOR_LIGHT_RED);
         return;
     }
 
     console_print_colored("Contents:\n", COLOR_YELLOW_ON_BLACK);
 
-    for (uint32_t i = 0; i < current_dir->child_count; i++) {
-        uint32_t child_id = current_dir->child_ids[i];
-        fs_node_t* child = fs_get_node(child_id);
+    fs_dirent_t entries[SECTOR_SIZE / sizeof(fs_dirent_t)];
+    int found_any = 0;
 
-        if (child) {
-            if (child->type == FS_TYPE_DIRECTORY) {
-                console_print_colored(child->name, COLOR_YELLOW_ON_BLACK);
-                console_print_colored("/", COLOR_YELLOW_ON_BLACK);
-            } else {
-                console_print_colored(child->name, COLOR_WHITE_ON_BLACK);
-                console_print(" (");
-                char size_str[12];
-                int_to_str((int)child->size, size_str);
-                console_print(size_str);
-                console_print(" bytes)");
+    for (int i = 0; i < 12; i++) {
+        uint32_t b_id = current_dir->blocks[i];
+        if (b_id == 0) continue;
+
+        ata_read_sectors(b_id, 1, entries);
+        for (int j = 0; j < (SECTOR_SIZE / sizeof(fs_dirent_t)); j++) {
+            if (entries[j].inode_id != 0) {
+                inode_t* child = fs_get_node(entries[j].inode_id);
+                if (child) {
+                    if (child->type == FS_TYPE_DIRECTORY) {
+                        console_print_colored(entries[j].name, COLOR_YELLOW_ON_BLACK);
+                        console_print_colored("/", COLOR_YELLOW_ON_BLACK);
+                    } else {
+                        console_print_colored(entries[j].name, COLOR_WHITE_ON_BLACK);
+                        console_print(" (");
+                        char size_str[12];
+                        int_to_str((int)child->size, size_str);
+                        console_print(size_str);
+                        console_print(" bytes)");
+                    }
+                    console_print("\n");
+                    found_any = 1;
+                }
             }
-            console_print("\n");
         }
+    }
+
+    if (!found_any) {
+        console_print_colored("Directory is empty.\n", COLOR_YELLOW_ON_BLACK);
     }
 }
 
@@ -268,10 +276,12 @@ void cmd_rmdir(char* path) {
 
 // --- NEW: Enhanced ADD command with save functionality ---
 void cmd_add(char* args) {
-    fs_node_t* cur = fs_get_node(fs_current_dir_id);
+    inode_t* cur = fs_get_node(fs_current_dir_id);
+    char name[FS_MAX_NAME];
+    fs_get_inode_name(fs_current_dir_id, name);
 
     // Check if we're in /a directory
-    if (!cur || cur->parent_id != fs_root_id || strcmp(cur->name, "a") != 0) {
+    if (!cur || cur->parent_id != fs_root_id || strcmp(name, "a") != 0) {
         console_print_colored("Mount /a for executing this command\n", COLOR_YELLOW_ON_BLACK);
         return;
     }
@@ -333,23 +343,16 @@ void cmd_add(char* args) {
         }
 
         if (file_node) {
-            // For simplicity, we'll store the result in the node's padding area
-            // (In a real FS, you'd write to data sectors)
+            // Write result using the new API
             int result_len = strlen(last_result);
-            if (result_len < 200) { // Safety check
-                // Copy result to padding area (acts as simple content storage)
-                for (int i = 0; i < result_len; i++) {
-                    file_node->padding[i] = last_result[i];
-                }
-                file_node->padding[result_len] = '\n';
-                file_node->padding[result_len + 1] = '\0';
-                file_node->size = result_len + 1;
-
-                // Persist to disk
-                fs_update_node(file_node);
+            char full_content[256];
+            strcpy(full_content, last_result);
+            strcat(full_content, "\n");
+            
+            if (fs_write(file_node, 0, strlen(full_content), (uint8_t*)full_content)) {
                 console_print_colored("Result saved to /a/results.txt\n", COLOR_GREEN_ON_BLACK);
             } else {
-                console_print_colored("Error: Result too large to save.\n", COLOR_LIGHT_RED);
+                console_print_colored("Error: Failed to write to file.\n", COLOR_LIGHT_RED);
             }
         }
     }
@@ -525,9 +528,11 @@ void cmd_sysinfo() {
     if (boot_dir) {
         uint32_t version_id = fs_find_node_local_id(boot_dir->id, "version");
         if (version_id) {
-            fs_node_t* version_file = fs_get_node(version_id);
+            inode_t* version_file = fs_get_node(version_id);
             if (version_file && version_file->size > 0) {
-                char* content = (char*)version_file->padding;
+                char content[256];
+                int read = fs_read(version_file, 0, 255, (uint8_t*)content);
+                content[read] = '\0';
                 console_print(content);
                 console_print("\n");
             }
@@ -583,7 +588,9 @@ void cmd_motd() {
 
     fs_node_t* motd_file = fs_get_node(motd_id);
     if (motd_file && motd_file->size > 0) {
-        char* content = (char*)motd_file->padding;
+        char content[256];
+        int read = fs_read(motd_file, 0, 255, (uint8_t*)content);
+        content[read] = '\0';
         console_print_colored(content, COLOR_GREEN_ON_BLACK);
     }
 }

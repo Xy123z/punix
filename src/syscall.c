@@ -10,6 +10,7 @@
 #include "../include/fs.h"
 #include "../include/string.h"
 #include "../include/memory.h"
+#include "../include/ata.h"
 
 
 // File descriptor table (simplified - single process for now)
@@ -139,21 +140,11 @@ uint32_t syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
                 break;
             }
 
-            // Read from file's padding area (simple implementation)
             uint32_t offset = fd_table[fd].offset;
-            uint32_t bytes_to_read = count;
-            if (offset + bytes_to_read > node->size) {
-                bytes_to_read = node->size - offset;
-            }
+            uint32_t bytes_read = fs_read(node, offset, count, (uint8_t*)buf);
 
-            // Copy data
-            char* file_data = (char*)node->padding;
-            for (uint32_t i = 0; i < bytes_to_read; i++) {
-                buf[i] = file_data[offset + i];
-            }
-
-            fd_table[fd].offset += bytes_to_read;
-            ret = bytes_to_read;
+            fd_table[fd].offset += bytes_read;
+            ret = bytes_read;
             break;
         }
 
@@ -174,25 +165,11 @@ uint32_t syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
                 break;
             }
 
-            // Write to file's padding area
             uint32_t offset = fd_table[fd].offset;
-            uint32_t bytes_to_write = count;
-            if (offset + bytes_to_write > 400) {  // Max padding size
-                bytes_to_write = 400 - offset;
-            }
+            uint32_t bytes_written = fs_write(node, offset, count, (uint8_t*)buf);
 
-            char* file_data = (char*)node->padding;
-            for (uint32_t i = 0; i < bytes_to_write; i++) {
-                file_data[offset + i] = buf[i];
-            }
-
-            if (offset + bytes_to_write > node->size) {
-                node->size = offset + bytes_to_write;
-            }
-
-            fd_table[fd].offset += bytes_to_write;
-            fs_update_node(node);
-            ret = bytes_to_write;
+            fd_table[fd].offset += bytes_written;
+            ret = bytes_written;
             break;
         }
 
@@ -205,38 +182,21 @@ uint32_t syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
         }
 
         case SYS_GETCWD: {
-            // sys_getcwd(char* buf, size_t size)
             char* buf = (char*)ebx;
-            uint32_t size = ecx;
+            if (!buf) { ret = -1; break; }
 
-            // Build path string
-            // For simplicity, just return the current directory name
-            
-            // DEBUG: Trace CWD ID and Pointer
-            console_print("CWD ID: ");
-            char n[12];
-            int_to_str(current_cwd, n);
-            console_print(n);
-            
-            // fs_node_t* cwd = fs_get_node(current_cwd);
-            
-            console_print(" SKIPPING FS LOOKUP\n");
-            // int_to_hex((uint32_t)cwd, n);
-            // console_print(n);
-            // console_print("\n");
-
-            // if (cwd) {
-                // FORCE ROOT for testing
-                // if (current_cwd == fs_root_id) {
+            char name[FS_MAX_NAME];
+            if (fs_get_inode_name(current_cwd, name)) {
+                if (current_cwd == fs_root_id) {
                     strcpy(buf, "/");
-                // } else {
-                //     strcpy(buf, "/");
-                //     strcat(buf, cwd->name);
-                // }
+                } else {
+                    strcpy(buf, "/");
+                    strcat(buf, name);
+                }
                 ret = 0;
-            // } else {
-            //     ret = -1;
-            // }
+            } else {
+                ret = -1;
+            }
             break;
         }
 
@@ -298,7 +258,6 @@ uint32_t syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
         }
 
         case SYS_GETDENTS: {
-            // sys_getdents(const char* path, struct dirent* buf, int count)
             char* path = (char*)ebx;
             struct dirent* dirents = (struct dirent*)ecx;
             int max_count = (int)edx;
@@ -309,17 +268,24 @@ uint32_t syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
                 break;
             }
 
-            // Copy directory entries
-            int count = dir->child_count;
-            if (count > max_count) count = max_count;
+            int count = 0;
+            fs_dirent_t entries[SECTOR_SIZE / sizeof(fs_dirent_t)];
 
-            for (int i = 0; i < count; i++) {
-                uint32_t child_id = dir->child_ids[i];
-                fs_node_t* child = fs_get_node(child_id);
-                if (child) {
-                    dirents[i].d_ino = child->id;
-                    dirents[i].d_type = child->type;
-                    strcpy(dirents[i].d_name, child->name);
+            for (int i = 0; i < 12 && count < max_count; i++) {
+                if (dir->blocks[i] == 0) continue;
+                // Note: In syscall layer, we should probably use a safer read
+                // but direct ATA read is used for simplicity in this kernel stage.
+                extern int ata_read_sectors(uint32_t lba, uint8_t count, void* buffer);
+                ata_read_sectors(dir->blocks[i], 1, entries);
+
+                for (int j = 0; j < (SECTOR_SIZE / sizeof(fs_dirent_t)) && count < max_count; j++) {
+                    if (entries[j].inode_id != 0) {
+                        dirents[count].d_ino = entries[j].inode_id;
+                        inode_t* child = fs_get_node(entries[j].inode_id);
+                        dirents[count].d_type = child ? child->type : 0;
+                        strcpy(dirents[count].d_name, entries[j].name);
+                        count++;
+                    }
                 }
             }
 

@@ -60,18 +60,21 @@ int auth_load_credentials() {
         return 0;
     }
 
-    // Read credentials from file's padding area
-    credentials_t* creds = (credentials_t*)cred_file->padding;
+    // Read credentials via new API
+    credentials_t creds;
+    if (fs_read(cred_file, 0, sizeof(credentials_t), (uint8_t*)&creds) < sizeof(uint32_t)) {
+        return 0;
+    }
 
     // Validate magic number
-    if (creds->magic != CREDENTIALS_MAGIC) {
+    if (creds.magic != CREDENTIALS_MAGIC) {
         console_print_colored("Warning: Credentials file corrupted.\n", COLOR_YELLOW_ON_BLACK);
         return 0;
     }
 
     // Load into global variables
-    strcpy(USERNAME, creds->username);
-    strcpy(ROOT_PASSWORD, creds->password);
+    strcpy(USERNAME, creds.username);
+    strcpy(ROOT_PASSWORD, creds.password);
 
     return 1;
 }
@@ -115,16 +118,17 @@ int auth_save_credentials() {
         return 0;
     }
 
-    // Write credentials to file's padding area
-    credentials_t* creds = (credentials_t*)cred_file->padding;
-    creds->magic = CREDENTIALS_MAGIC;
-    strcpy(creds->username, USERNAME);
-    strcpy(creds->password, ROOT_PASSWORD);
+    // Prepare and write credentials via new API
+    credentials_t creds;
+    memset(&creds, 0, sizeof(credentials_t));
+    creds.magic = CREDENTIALS_MAGIC;
+    strcpy(creds.username, USERNAME);
+    strcpy(creds.password, ROOT_PASSWORD);
 
-    // Update file size
-    cred_file->size = sizeof(credentials_t);
+    if (fs_write(cred_file, 0, sizeof(credentials_t), (uint8_t*)&creds) < sizeof(credentials_t)) {
+        return 0;
+    }
 
-    // Persist to disk
     fs_update_node(cred_file);
 
     return 1;
