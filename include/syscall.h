@@ -30,12 +30,25 @@ struct dirent {
 #define SYS_FREE         14
 #define SYS_PRINT        15
 #define SYS_CREATE_FILE  16
-
-// Open flags
+#define SYS_GETCHAR      17
+#define SYS_PUTCHAR      18
+#define SYS_PRINT_COLORED 19
+#define SYS_CLEAR_SCREEN 20
+#define SYS_GET_DISK_STATS 21
+#define SYS_GET_CACHE_STATS 22
+#define SYS_SYNC         23
+#define SYS_CHUSER       24
+#define SYS_CHPASS       25
+#define O_CREAT   0x04
 #define O_RDONLY  0x00
 #define O_WRONLY  0x01
 #define O_RDWR    0x02
-#define O_CREAT   0x04
+
+#define SYS_GETUID       26
+#define SYS_SETUID       27
+#define SYS_AUTHENTICATE 28
+#define SYS_SHUTDOWN     29
+#define SYS_RESTART      30
 
 // Kernel-side functions
 void syscall_init();
@@ -188,6 +201,172 @@ static inline int sys_create_file(const char* path) {
         "mov %%eax, %0\n"
         : "=r"(ret)
         : "r"(path)
+        : "eax", "ebx"
+    );
+    return ret;
+}
+
+static inline void sys_print_colored(const char* str, uint8_t color) {
+    __asm__ volatile(
+        "mov $19, %%eax\n"
+        "mov %0, %%ebx\n"
+        "mov %1, %%ecx\n"
+        "int $0x80\n"
+        :
+        : "r"(str), "r"((uint32_t)color)
+        : "eax", "ebx", "ecx"
+    );
+}
+
+static inline void sys_clear_screen() {
+    __asm__ volatile(
+        "mov $20, %%eax\n"
+        "int $0x80\n"
+        :
+        :
+        : "eax"
+    );
+}
+
+static inline void sys_get_cache_stats(uint32_t* size, uint32_t* nodes, uint32_t* dirty) {
+    __asm__ volatile(
+        "mov $22, %%eax\n"
+        "mov %0, %%ebx\n"
+        "mov %1, %%ecx\n"
+        "mov %2, %%edx\n"
+        "int $0x80\n"
+        :
+        : "r"(size), "r"(nodes), "r"(dirty)
+        : "eax", "ebx", "ecx", "edx"
+    );
+}
+
+static inline void sys_get_disk_stats(uint32_t* total, uint32_t* used, uint32_t* free) {
+    __asm__ volatile(
+        "mov $21, %%eax\n"
+        "mov %0, %%ebx\n"
+        "mov %1, %%ecx\n"
+        "mov %2, %%edx\n"
+        "int $0x80\n"
+        :
+        : "r"(total), "r"(used), "r"(free)
+        : "eax", "ebx", "ecx", "edx"
+    );
+}
+
+static inline void sys_sync() {
+    __asm__ volatile(
+        "mov $23, %%eax\n"
+        "int $0x80\n"
+        :
+        :
+        : "eax"
+    );
+}
+
+static inline int sys_chuser(const char* username) {
+    int ret;
+    __asm__ volatile(
+        "mov $24, %%eax\n"
+        "mov %1, %%ebx\n"
+        "int $0x80\n"
+        "mov %%eax, %0\n"
+        : "=r"(ret)
+        : "r"(username)
+        : "eax", "ebx"
+    );
+    return ret;
+}
+
+static inline int sys_chpass(const char* password) {
+    int ret;
+    __asm__ volatile(
+        "mov $25, %%eax\n"
+        "mov %1, %%ebx\n"
+        "int $0x80\n"
+        "mov %%eax, %0\n"
+        : "=r"(ret)
+        : "r"(password)
+        : "eax", "ebx"
+    );
+    return ret;
+}
+
+static inline uint32_t sys_getuid() {
+    uint32_t ret;
+    __asm__ volatile(
+        "mov $26, %%eax\n"
+        "int $0x80\n"
+        "mov %%eax, %0\n"
+        : "=r"(ret)
+        : : "eax"
+    );
+    return ret;
+}
+
+static inline int sys_setuid(uint32_t uid) {
+    int ret;
+    __asm__ volatile(
+        "mov $27, %%eax\n"
+        "mov %1, %%ebx\n"
+        "int $0x80\n"
+        "mov %%eax, %0\n"
+        : "=r"(ret)
+        : "r"(uid)
+        : "eax", "ebx"
+    );
+    return ret;
+}
+
+static inline char sys_getchar() {
+    char ret;
+    __asm__ volatile(
+        "mov $17, %%eax\n"
+        "int $0x80\n"
+        "mov %%al, %0\n"
+        : "=r"(ret)
+        :
+        : "eax"
+    );
+    return ret;
+}
+
+static inline void sys_putchar(char c) {
+    __asm__ volatile(
+        "mov $18, %%eax\n"
+        "mov %0, %%ebx\n"
+        "int $0x80\n"
+        :
+        : "r"((uint32_t)c)
+        : "eax", "ebx"
+    );
+}
+
+static inline void sys_shutdown() {
+    __asm__ volatile(
+        "mov $29, %%eax\n"
+        "int $0x80\n"
+        : : : "eax"
+    );
+}
+
+static inline void sys_restart() {
+    __asm__ volatile(
+        "mov $30, %%eax\n"
+        "int $0x80\n"
+        : : : "eax"
+    );
+}
+
+static inline int sys_authenticate(const char* password) {
+    int ret;
+    __asm__ volatile(
+        "mov $28, %%eax\n"
+        "mov %1, %%ebx\n"
+        "int $0x80\n"
+        "mov %%eax, %0\n"
+        : "=r"(ret)
+        : "r"(password)
         : "eax", "ebx"
     );
     return ret;

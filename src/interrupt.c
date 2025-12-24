@@ -207,7 +207,8 @@ void idt_init() {
     
     // Set keyboard interrupt (IRQ1 = interrupt 33)
     idt_set_gate(33, (uint32_t)keyboard_interrupt_handler, 0x08, 0x8E);
-    idt_set_gate(0x80, (uint32_t)syscall_interrupt_wrapper, 0x08, 0x8E);
+    // Set syscall interrupt (0x80) with DPL 3 to allow user mode calls
+    idt_set_gate(0x80, (uint32_t)syscall_interrupt_wrapper, 0x08, 0xEE);
     __asm__ volatile("lidt %0" : : "m"(idtp));
 }
 

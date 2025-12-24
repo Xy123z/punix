@@ -51,6 +51,18 @@ echo "[8/12] Compiling text.c..."
 gcc $CFLAGS -c src/text.c -o text.o
 if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
 
+echo "[8.1] Compiling gdt.c..."
+gcc $CFLAGS -c src/gdt.c -o gdt.o
+if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
+
+echo "[8.2] Compiling task.c..."
+gcc $CFLAGS -c src/task.c -o task.o
+if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
+
+echo "[8.3] Assembling GDT flush & User Entry..."
+nasm -f elf32 src/gdt_flush.asm -o gdt_flush.o
+nasm -f elf32 src/user_entry.asm -o user_entry.o
+
 echo "[9/12] Compiling console.c..."
 gcc $CFLAGS -c src/console.c -o console.o
 if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
@@ -82,7 +94,7 @@ if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
 
 echo "[14/12] Linking kernel..."
 ld -m elf_i386 -Ttext 0x10000 --oformat binary \
-   kernel.o string.o vga.o memory.o paging.o interrupt.o shell.o fs.o text.o console.o mouse.o ata.o math.o auth.o syscall.o\
+   kernel.o string.o vga.o memory.o paging.o interrupt.o shell.o fs.o text.o console.o mouse.o ata.o math.o auth.o syscall.o gdt.o gdt_flush.o task.o user_entry.o\
    -o kernel.bin -nostdlib -e _start
 if [ $? -ne 0 ]; then
     echo "Error: Linking failed!"

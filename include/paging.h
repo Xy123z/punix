@@ -98,6 +98,7 @@ uint32_t paging_get_physical(page_directory_t* dir, uint32_t virt);
  */
 void paging_switch_directory(page_directory_t* dir);
 
+void paging_set_user_access(page_directory_t* dir, uint32_t virt_start, uint32_t size, int user);
 void page_fault_handler(uint32_t error_code, uint32_t fault_addr);
 page_t* paging_get_page(uint32_t address, int make, page_directory_t* dir);
 

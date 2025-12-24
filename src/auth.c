@@ -247,3 +247,17 @@ int auth_change_password(void (*read_line_func)(char*, int)) {
         return 0;
     }
 }
+
+void auth_set_username(const char* name) {
+    if (!name) return;
+    strncpy(USERNAME, name, MAX_USERNAME_LEN - 1);
+    USERNAME[MAX_USERNAME_LEN - 1] = '\0';
+    auth_save_credentials();
+}
+
+void auth_set_password(const char* pass) {
+    if (!pass) return;
+    strncpy(ROOT_PASSWORD, pass, MAX_PASSWORD_LEN - 1);
+    ROOT_PASSWORD[MAX_PASSWORD_LEN - 1] = '\0';
+    auth_save_credentials();
+}

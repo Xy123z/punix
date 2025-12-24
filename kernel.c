@@ -12,75 +12,59 @@
 #include "include/console.h"
 #include "include/ata.h"
 #include "include/auth.h"
+#include "include/gdt.h"
+#include "include/task.h"
 #include "include/syscall.h"
 
 void kernel_main() {
     // Initialize VGA
     console_init();
     console_clear_screen();
-    // Initialize kernel
+    
+    // 1. Core CPU Architecture
+    gdt_init();
     console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
-    console_print_colored("Initializing kernel...\n", COLOR_GREEN_ON_BLACK);
-    for (volatile int i = 0; i < 100000000; i++);
+    console_print_colored("GDT and TSS initialized.\n", COLOR_GREEN_ON_BLACK);
 
-     syscall_init();
-    console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
-    console_print_colored("System calls initialized.\n", COLOR_GREEN_ON_BLACK);
-    for (volatile int i = 0; i < 100000000; i++);
-
-    // Initialize memory
-    console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
-    console_print_colored("Setting up memory manager...\n", COLOR_YELLOW_ON_BLACK);
+    // 2. Memory Management (Identity mapping environment)
     pmm_init();
     heap_init();
-
-    // Initialize paging subsystem
     console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
-    console_print_colored("Initializing page tables...\n", COLOR_YELLOW_ON_BLACK);
+    console_print_colored("Memory manager initialized.\n", COLOR_GREEN_ON_BLACK);
+
+    // 3. System Call & Task Management (Requires Heap)
+    syscall_init();
+    console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
+    console_print_colored("System calls and initial task ready.\n", COLOR_GREEN_ON_BLACK);
+
+    // 4. Paging Setup
     paging_init();
-    for (volatile int i = 0; i < 100000000; i++);
-
-    // Enable paging
-    paging_enable();
-    for (volatile int i = 0; i < 100000000; i++);
-
-    // Initialize ATA before filesystem
-    ata_init();
-
-    // Initialize filesystem (will create /a and /h on first boot and set cwd to /a)
-    fs_init();
-    syscall_set_cwd(fs_current_dir_id); // Sync syscall CWD with FS
-    for (volatile int i = 0; i < 100000000; i++);
-
-    // Test memory
-    void* test_page = pmm_alloc_page();
-    if (test_page) {
-        pmm_free_page(test_page);
-        console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
-        console_print_colored("Memory manager ready!\n", COLOR_GREEN_ON_BLACK);
-        for (volatile int i = 0; i < 100000000; i++);
-    }
-
-    // Initialize interrupts
     console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
-    console_print_colored("Setting up IDT...\n", COLOR_YELLOW_ON_BLACK);
+    console_print_colored("Page tables prepared.\n", COLOR_GREEN_ON_BLACK);
+
+    // 5. Interrupts (MUST be before paging_enable to catch faults)
     idt_init();
-    for (volatile int i = 0; i < 100000000; i++);
-
-    console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
-    console_print_colored("Configuring PIC...\n", COLOR_YELLOW_ON_BLACK);
     pic_init();
-    for (volatile int i = 0; i < 100000000; i++);
-
     console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
-    console_print_colored("Configuring mouse driver...\n", COLOR_YELLOW_ON_BLACK);
-    mouse_init();
-    for (volatile int i = 0; i < 100000000; i++);
+    console_print_colored("IDT and PIC configured.\n", COLOR_GREEN_ON_BLACK);
 
+    // 6. Enable Paging
+    paging_enable();
+    console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
+    console_print_colored("Paging enabled.\n", COLOR_GREEN_ON_BLACK);
+
+    // 7. Hardware & Filesystem
+    ata_init();
+    fs_init();
+    syscall_set_cwd(fs_current_dir_id);
+    mouse_init();
+    console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
+    console_print_colored("Hardware and Filesystem ready.\n", COLOR_GREEN_ON_BLACK);
+
+    // 8. Finalize Kernel Space
     console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
     console_print_colored("Enabling interrupts...\n", COLOR_YELLOW_ON_BLACK);
     __asm__ volatile("sti");
-    for (volatile int i = 0; i < 100000000; i++);
 
     console_print_colored("[ ok ] ", COLOR_GREEN_ON_BLACK);
     console_print_colored("Kernel ready!\n\n", COLOR_GREEN_ON_BLACK);
@@ -100,9 +84,19 @@ void kernel_main() {
     console_print("DEBUG: Clearing screen...\n");
     console_clear_screen();
     console_print("DEBUG: shell_init()...\n");
-    shell_init();
-    console_print("DEBUG: shell_run()...\n");
-    shell_run();
+    // Start shell in User Mode (Ring 3)
+    console_print("DEBUG: Switching to User Mode (Ring 3)...\n");
+    
+    // Allocate a user stack
+    void* user_stack_phys = pmm_alloc_page();
+    uint32_t user_stack_ext = 0xB0000000; // Arbitrary user stack address
+    paging_map_page(current_page_directory, user_stack_ext, (uint32_t)user_stack_phys, PAGE_PRESENT | PAGE_RW | PAGE_USER);
+    
+    // Ensure the shell code/data (currently part of kernel) is user-reachable
+    // For now, we'll mark the first 4MB as user-reachable so the shell can run.
+    paging_map_range(current_page_directory, 0x0, 0x0, 0x400000, PAGE_PRESENT | PAGE_RW | PAGE_USER);
+
+    enter_user_mode((uint32_t)shell_run, user_stack_ext + PAGE_SIZE);
 
     // Should never reach here
     while(1) {

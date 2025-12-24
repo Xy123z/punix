@@ -39,33 +39,26 @@ void paging_init() {
     memset(kernel_page_directory, 0, sizeof(page_directory_t));
 
     // Identity map the kernel (0x00000000 - 0x00400000, 4MB)
-    // This maps virtual addresses to same physical addresses for kernel code
-    console_print_colored("[ ** ] ", COLOR_YELLOW_ON_BLACK);
-    console_print_colored("Identity mapping kernel memory...\n", COLOR_WHITE_ON_BLACK);
-
     paging_map_range(kernel_page_directory, 
                      0x00000000,   // Virtual start
-                     0x00000000,   // Physical start (same as virtual)
+                     0x00000000,   // Physical start
                      0x00400000,   // 4MB
-                     PAGE_PRESENT | PAGE_RW);  // Kernel pages (supervisor mode)
+                     PAGE_PRESENT | PAGE_RW);  // Supervisor mode (Ring 0)
 
     // Map allocatable memory (Heap & PMM managed memory)
-    // From KERNEL_END (0x400000) to MEMORY_END (0x2000000)
-    console_print_colored("[ ** ] ", COLOR_YELLOW_ON_BLACK);
-    console_print_colored("Mapping heap/physical memory pool...\n", COLOR_WHITE_ON_BLACK);
-    
+    // From 4MB to 32MB
     paging_map_range(kernel_page_directory,
-                     0x00400000,   // Virtual start (4MB)
+                     0x00400000,   // Virtual start
                      0x00400000,   // Physical start
-                     0x02000000 - 0x00400000, // Size: 32MB - 4MB
-                     PAGE_PRESENT | PAGE_RW);
+                     0x02000000 - 0x00400000, // 28MB
+                     PAGE_PRESENT | PAGE_RW); // Supervisor mode
 
     // Map VGA memory (0xB8000 - 0xBFFFF)
     paging_map_range(kernel_page_directory,
                      0x000B8000,
                      0x000B8000,
                      0x00008000,  // 32KB
-                     PAGE_PRESENT | PAGE_RW);
+                     PAGE_PRESENT | PAGE_RW | PAGE_USER); // User reachable for console
 
     current_page_directory = kernel_page_directory;
 
@@ -115,6 +108,11 @@ void paging_map_page(page_directory_t* dir, uint32_t virt, uint32_t phys, uint32
         // Set page directory entry
         // Store physical address of page table + flags
         dir->entries[pd_idx] = ((uint32_t)new_table) | PAGE_PRESENT | PAGE_RW | (flags & PAGE_USER);
+    } else {
+        // Ensure USER bit is set in PDE if mapping requires user access
+        if (flags & PAGE_USER) {
+            dir->entries[pd_idx] |= PAGE_USER;
+        }
     }
 
     // Get page table

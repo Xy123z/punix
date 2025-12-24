@@ -39,4 +39,14 @@ int auth_change_username(void (*read_line_func)(char*, int));
  */
 int auth_change_password(void (*read_line_func)(char*, int));
 
+/**
+ * @brief Sets the username directly (no UI)
+ */
+void auth_set_username(const char* name);
+
+/**
+ * @brief Sets the password directly (no UI)
+ */
+void auth_set_password(const char* pass);
+
 #endif // AUTH_H

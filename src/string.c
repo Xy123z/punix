@@ -131,6 +131,26 @@ char* strchr(const char* s, int c) {
 }
 
 /**
+ * Locates the last occurrence of the character c (converted to a char) in the string s.
+ */
+char* strrchr(const char* s, int c) {
+    unsigned char ch = (unsigned char)c;
+    char* last = (char*)0;
+    
+    while (1) {
+        if (*s == ch) {
+            last = (char*)s;
+        }
+        if (*s == '\0') {
+            break;
+        }
+        s++;
+    }
+    
+    return last;
+}
+
+/**
  * Converts an integer to a string.
  */
 void int_to_str(int num, char* str) {

@@ -12,6 +12,8 @@
 #include "../include/memory.h"
 #include "../include/ata.h"
 
+#include "../include/auth.h"
+#include "../include/task.h"
 
 // File descriptor table (simplified - single process for now)
 #define MAX_FDS 16
@@ -28,13 +30,16 @@ static file_descriptor_t fd_table[MAX_FDS];
 static uint32_t current_cwd = 0;
 
 /**
- * @brief Initialize file descriptor table
+ * @brief Initialize file descriptor table and task management
  */
 void syscall_init() {
     // Clear FD table
     for (int i = 0; i < MAX_FDS; i++) {
         fd_table[i].in_use = 0;
     }
+    
+    // Initialize task management
+    task_init();
     
     // Default to root if not set
     current_cwd = fs_root_id;
@@ -88,22 +93,46 @@ uint32_t syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
     uint32_t syscall_num = eax;
     uint32_t ret = 0;
 
-    // DEBUG: Trace syscalls
-    if (syscall_num != SYS_PRINT) { // Don't trace print to avoid recursion loop
-       console_print("SC: ");
-       char num[12];
-       int_to_str(syscall_num, num);
-       console_print(num);
-       console_print(" EAX="); int_to_hex(eax, num); console_print(num);
-       console_print(" EBX="); int_to_hex(ebx, num); console_print(num);
-       console_print("\n");
-    }
-
     switch (syscall_num) {
         case SYS_PRINT: {
             // sys_print(const char* str)
             char* str = (char*)ebx;
             console_print(str);
+            ret = 0;
+            break;
+        }
+
+        case SYS_GETCHAR: {
+            ret = keyboard_read();
+            break;
+        }
+
+        case SYS_PUTCHAR: {
+            console_putchar((char)ebx, COLOR_WHITE_ON_BLACK);
+            ret = 0;
+            break;
+        }
+
+        case SYS_PRINT_COLORED: {
+            console_print_colored((const char*)ebx, (uint8_t)ecx);
+            ret = 0;
+            break;
+        }
+
+        case SYS_CLEAR_SCREEN: {
+            console_clear_screen();
+            ret = 0;
+            break;
+        }
+
+        case SYS_GET_DISK_STATS: {
+            fs_get_disk_stats((uint32_t*)ebx, (uint32_t*)ecx, (uint32_t*)edx);
+            ret = 0;
+            break;
+        }
+
+        case SYS_GET_CACHE_STATS: {
+            fs_get_cache_stats((uint32_t*)ebx, (uint32_t*)ecx, (uint32_t*)edx);
             ret = 0;
             break;
         }
@@ -181,6 +210,102 @@ uint32_t syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
             break;
         }
 
+        case SYS_SYNC: {
+            fs_sync();
+            ret = 0;
+            break;
+        }
+
+        case SYS_CHUSER: {
+            // sys_chuser(const char* username)
+            if (current_task->uid != 0) {
+                ret = -1; // Permission denied
+                break;
+            }
+            const char* username = (const char*)ebx;
+            auth_set_username(username);
+            ret = 0;
+            break;
+        }
+
+        case SYS_CHPASS: {
+            // sys_chpass(const char* password)
+            if (current_task->uid != 0) {
+                ret = -1; // Permission denied
+                break;
+            }
+            const char* password = (const char*)ebx;
+            auth_set_password(password);
+            ret = 0;
+            break;
+        }
+
+        case SYS_GETUID: {
+            ret = current_task->uid;
+            break;
+        }
+
+        case SYS_SETUID: {
+            // sys_setuid(uint32_t uid)
+            // Only root can set uid to something else
+            if (current_task->uid != 0) {
+                ret = -1;
+                break;
+            }
+            current_task->uid = ebx;
+            ret = 0;
+            break;
+        }
+
+        case SYS_AUTHENTICATE: {
+            // sys_authenticate(const char* password)
+            // Verifies password and sets uid to 0 on success
+            extern char ROOT_PASSWORD[MAX_PASSWORD_LEN];
+            const char* pass = (const char*)ebx;
+            if (strcmp(pass, ROOT_PASSWORD) == 0) {
+                current_task->uid = 0;
+                ret = 0;
+            } else {
+                ret = -1;
+            }
+            break;
+        }
+
+        case SYS_SHUTDOWN: {
+            console_print_colored("\nSHUTTING DOWN SYSTEM...\n", COLOR_YELLOW_ON_BLACK);
+            
+            // QEMU/Bochs ACPI Shutdown
+            __asm__ volatile("outw %0, %1" : : "a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
+            
+            // VirtualBox Shutdown (Modern ACPI)
+            __asm__ volatile("outw %0, %1" : : "a"((uint16_t)0x3400), "Nd"((uint16_t)0x4004));
+            
+            // QEMU Debug Exit (if enabled)
+            __asm__ volatile("outb %0, %1" : : "a"((uint8_t)0x0), "Nd"((uint16_t)0x501));
+
+            // If all else fails, halt
+            while(1) __asm__ volatile("cli; hlt");
+            break;
+        }
+
+        case SYS_RESTART: {
+            console_print_colored("\nRESTARTING SYSTEM...\n", COLOR_YELLOW_ON_BLACK);
+            
+            // 8042 Keyboard Controller Reset
+            uint8_t good = 0x02;
+            while (good & 0x02) {
+                __asm__ volatile("inb $0x64, %0" : "=a"(good));
+            }
+            __asm__ volatile("outb %0, %1" : : "a"((uint8_t)0xFE), "Nd"((uint16_t)0x64));
+            
+            // Fallback: Triple Fault
+            __asm__ volatile("lidt (%0)" : : "r" (0));
+            __asm__ volatile("int $3");
+            
+            while(1) __asm__ volatile("cli; hlt");
+            break;
+        }
+
         case SYS_GETCWD: {
             char* buf = (char*)ebx;
             if (!buf) { ret = -1; break; }
@@ -217,11 +342,32 @@ uint32_t syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
         case SYS_MKDIR: {
             // sys_mkdir(const char* path)
             char* path = (char*)ebx;
+            char parent_path[128];
+            char name[FS_MAX_NAME];
+            
+            // Resolve parent and name
+            char* last_slash = strrchr(path, '/');
+            if (last_slash) {
+                int len = last_slash - path;
+                if (len == 0) { // Root mkdir
+                    strcpy(parent_path, "/");
+                } else {
+                    strncpy(parent_path, path, len);
+                    parent_path[len] = '\0';
+                }
+                strcpy(name, last_slash + 1);
+            } else {
+                strcpy(parent_path, ".");
+                strcpy(name, path);
+            }
 
-            // Parse parent directory and new dir name
-            // Simplified: assume path is just the name in current directory
-            if (fs_create_node(current_cwd, path, FS_TYPE_DIRECTORY)) {
-                ret = 0;
+            fs_node_t* parent = fs_find_node(parent_path, current_cwd);
+            if (parent && parent->type == FS_TYPE_DIRECTORY) {
+                if (fs_create_node(parent->id, name, FS_TYPE_DIRECTORY)) {
+                    ret = 0;
+                } else {
+                    ret = -1;
+                }
             } else {
                 ret = -1;
             }
@@ -248,9 +394,31 @@ uint32_t syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
         case SYS_CREATE_FILE: {
             // sys_create_file(const char* path)
             char* path = (char*)ebx;
+            char parent_path[128];
+            char name[FS_MAX_NAME];
 
-            if (fs_create_node(current_cwd, path, FS_TYPE_FILE)) {
-                ret = 0;
+            char* last_slash = strrchr(path, '/');
+            if (last_slash) {
+                int len = last_slash - path;
+                if (len == 0) {
+                    strcpy(parent_path, "/");
+                } else {
+                    strncpy(parent_path, path, len);
+                    parent_path[len] = '\0';
+                }
+                strcpy(name, last_slash + 1);
+            } else {
+                strcpy(parent_path, ".");
+                strcpy(name, path);
+            }
+
+            fs_node_t* parent = fs_find_node(parent_path, current_cwd);
+            if (parent && parent->type == FS_TYPE_DIRECTORY) {
+                if (fs_create_node(parent->id, name, FS_TYPE_FILE)) {
+                    ret = 0;
+                } else {
+                    ret = -1;
+                }
             } else {
                 ret = -1;
             }

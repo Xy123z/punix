@@ -13,6 +13,7 @@ int strcmp(const char* str1, const char* str2);
 void strcpy(char* dest, const char* src);
 char* strncpy(char* dest, const char* src, size_t n);
 char* strchr(const char* s, int c);
+char* strrchr(const char* s, int c);
 int strlen(const char* str);
 void strcat(char* dest, const char* source);
 void int_to_str(int num, char* str);
