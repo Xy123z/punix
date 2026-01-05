@@ -37,12 +37,15 @@ void sys_exit_impl(uint32_t status) {
     console_print_colored(status_str, COLOR_LIGHT_CYAN);
     console_print("\nreturned to kernel context\n");
 
+    extern void kern_shell_init();
+
+    // Restore kernel stack and jump to shell
     __asm__ volatile(
          "mov %0, %%esp\n"
-        "jmp kernel_after_user\n"
-        :
-        : "m"(kernel_esp_saved)
-        : "memory"
+         "jmp kern_shell_init\n"
+         :
+         : "m"(kernel_esp_saved)
+         : "memory"
     );
 
     __builtin_unreachable();

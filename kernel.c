@@ -94,15 +94,8 @@ kernel_user_entry();
     }
 }
 void kernel_user_entry(){
-__asm__ volatile(
-        "mov %%esp, %0"
-        : "=m"(kernel_esp_saved)
-        :
-        : "memory"
-    );
-    // Start external program from disk
-    // Load from filesystem instead of raw sectors
-    load_user_program("/bin/hello1");
+    extern void kern_shell_init();
+    kern_shell_init();
 }
 void kernel_after_user(void) {
     static char* programs[] = {

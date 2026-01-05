@@ -93,9 +93,13 @@ gcc $CFLAGS -c kernel.c -o kernel.o
 if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
 
 
-echo "[20/16] Linking kernel..."
+echo "[20/16] Compiling kernel_shell.c..."
+gcc $CFLAGS -c src/kernel_shell.c -o kernel_shell.o
+if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
+
+echo "[21/16] Linking kernel..."
 ld -m elf_i386 -Ttext 0x10000 --oformat binary \
-   boot_entry.o kernel.o string.o vga.o memory.o paging.o interrupt.o shell.o fs.o text.o console.o mouse.o ata.o math.o auth.o syscall.o gdt.o gdt_flush.o task.o user_entry.o loader.o\
+   boot_entry.o kernel.o string.o vga.o memory.o paging.o interrupt.o shell.o fs.o text.o console.o mouse.o ata.o math.o auth.o syscall.o gdt.o gdt_flush.o task.o user_entry.o loader.o kernel_shell.o\
    -o kernel.bin -nostdlib -e _start
 if [ $? -ne 0 ]; then
     echo "Error: Linking failed!"
