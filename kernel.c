@@ -14,8 +14,15 @@
 #include "include/auth.h"
 #include "include/gdt.h"
 #include "include/task.h"
+#include "include/task.h"
 #include "include/syscall.h"
+#include "include/loader.h"
 
+// Prototypes
+void kernel_main();
+void kernel_user_entry();
+extern void kernel_after_user(void);
+// kernel_main is called by src/boot_entry.asm
 void kernel_main() {
     // Initialize VGA
     console_init();
@@ -80,41 +87,42 @@ void kernel_main() {
     // Boot delay
     for (volatile int i = 0; i < 100000000; i++);
 
-    // Start shell
-    console_print("DEBUG: Clearing screen...\n");
-    console_clear_screen();
-    console_print("DEBUG: shell_init()...\n");
-    // Start shell in User Mode (Ring 3)
-    console_print("DEBUG: Switching to User Mode (Ring 3)...\n");
-    
-    // Allocate a user stack
-    void* user_stack_phys = pmm_alloc_page();
-    uint32_t user_stack_ext = 0xB0000000; // Arbitrary user stack address
-    paging_map_page(current_page_directory, user_stack_ext, (uint32_t)user_stack_phys, PAGE_PRESENT | PAGE_RW | PAGE_USER);
-    
-    // Ensure the shell code/data (currently part of kernel) is user-reachable
-    // For now, we'll mark the first 4MB as user-reachable so the shell can run.
-    paging_map_range(current_page_directory, 0x0, 0x0, 0x400000, PAGE_PRESENT | PAGE_RW | PAGE_USER);
-
-    enter_user_mode((uint32_t)shell_run, user_stack_ext + PAGE_SIZE);
-
+kernel_user_entry();
     // Should never reach here
     while(1) {
         __asm__ volatile("hlt");
     }
 }
+void kernel_user_entry(){
+__asm__ volatile(
+        "mov %%esp, %0"
+        : "=m"(kernel_esp_saved)
+        :
+        : "memory"
+    );
+    // Start external program from disk
+    // Load from filesystem instead of raw sectors
+    load_user_program("/bin/hello1");
+}
+void kernel_after_user(void) {
+    static char* programs[] = {
+        "/bin/hello2",
+        NULL
+    };
+    static int current_program = 0;
 
-void _start() {
-    // Test marker
-    char* vga = (char*)0xB8000;
-    vga[0] = 'T';
-    vga[1] = 0x0F;
-    vga[2] = 'E';
-    vga[3] = 0x0F;
-    vga[4] = 'S';
-    vga[5] = 0x0F;
-    vga[6] = 'T';
-    vga[7] = 0x0F;
+    if (programs[current_program] != NULL) {
+        console_print("Loading program: ");
+        console_print(programs[current_program]);
+        console_print("\n");
 
-    kernel_main();
+        char* prog = programs[current_program];  // Save pointer
+        current_program++;  // Increment before jumping
+        load_user_program(prog);  // Now jump
+    } else {
+        console_print_colored("\nAll programs finished. System halting.\n",
+                            COLOR_GREEN_ON_BLACK);
+        __asm__ volatile("cli");
+        while(1) __asm__ volatile("hlt");
+    }
 }

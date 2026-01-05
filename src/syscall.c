@@ -14,7 +14,8 @@
 
 #include "../include/auth.h"
 #include "../include/task.h"
-
+uint32_t kernel_esp_saved;
+extern void kernel_after_user(void);
 // File descriptor table (simplified - single process for now)
 #define MAX_FDS 16
 typedef struct {
@@ -28,7 +29,24 @@ static file_descriptor_t fd_table[MAX_FDS];
 
 // Current working directory (global for now)
 static uint32_t current_cwd = 0;
+__attribute__((noreturn))
+void sys_exit_impl(uint32_t status) {
+    console_print_colored("\nProcess exited with code: ", COLOR_LIGHT_CYAN);
+    char status_str[12];
+    int_to_str(status, status_str);
+    console_print_colored(status_str, COLOR_LIGHT_CYAN);
+    console_print("\nreturned to kernel context\n");
 
+    __asm__ volatile(
+         "mov %0, %%esp\n"
+        "jmp kernel_after_user\n"
+        :
+        : "m"(kernel_esp_saved)
+        : "memory"
+    );
+
+    __builtin_unreachable();
+}
 /**
  * @brief Initialize file descriptor table and task management
  */
@@ -100,6 +118,11 @@ uint32_t syscall_handler(uint32_t eax, uint32_t ebx, uint32_t ecx,
             console_print(str);
             ret = 0;
             break;
+        }
+
+        case SYS_EXIT: {
+            // sys_exit(int status)
+           sys_exit_impl(ebx);
         }
 
         case SYS_GETCHAR: {

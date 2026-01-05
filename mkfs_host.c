@@ -24,13 +24,13 @@
 #define FS_TYPE_DIRECTORY     1
 
 // Disk Layout (Must match fs.h)
-#define FS_SUPERBLOCK_SECTOR  61
-#define FS_INODE_BITMAP_SECTOR 62
-#define FS_BLOCK_BITMAP_START 63
+#define FS_SUPERBLOCK_SECTOR  256
+#define FS_INODE_BITMAP_SECTOR 257
+#define FS_BLOCK_BITMAP_START 258
 #define FS_BLOCK_BITMAP_COUNT 25
-#define FS_INODE_TABLE_START  88
+#define FS_INODE_TABLE_START  283
 #define FS_INODE_TABLE_COUNT  64
-#define FS_DATA_BLOCKS_START  152
+#define FS_DATA_BLOCKS_START  347
 
 // --- Data Structures (Must match fs.h) ---
 typedef struct {
@@ -587,6 +587,16 @@ int main(int argc, char** argv) {
         "# Text Editor Placeholder\n"
         "# This will be replaced with a user-space editor binary\n"
         "# Currently compiled into kernel\n");
+
+    // Copy hello user programs to /bin
+    uint32_t hello_file_1 = copy_host_file(bin_id, "hello1", "hello1.bin", 0755);
+    if (hello_file_1 == 0) {
+        printf("  WARNING: hello1.bin not found - hello1 program not copied to /bin\n");
+    }
+    uint32_t hello_file_2 = copy_host_file(bin_id, "hello2", "hello2.bin", 0755);
+    if (hello_file_2 == 0) {
+        printf("  WARNING: hello2.bin not found - hello2 program not copied to /bin\n");
+    }
 
     printf("\n");
     printf("Creating configuration files in /etc...\n");

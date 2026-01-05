@@ -4,6 +4,7 @@
 #define SYSCALL_H
 
 #include "types.h"
+extern uint32_t kernel_esp_saved;
 
 // Directory entry structure
 struct dirent {
@@ -386,6 +387,15 @@ static inline int sys_getdents(const char* path, struct dirent* buf, int count) 
         : "eax", "ebx", "ecx", "edx"
     );
     return ret;
+}
+
+static inline void sys_exit(int status) {
+    __asm__ volatile(
+        "mov $11, %%eax\n"      // SYS_EXIT
+        "mov %0, %%ebx\n"       // status
+        "int $0x80\n"
+        : : "r"(status) : "eax", "ebx"
+    );
 }
 
 #endif // SYSCALL_H

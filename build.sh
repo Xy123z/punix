@@ -50,9 +50,15 @@ echo "[10/16] Compiling task.c..."
 gcc $CFLAGS -c src/task.c -o task.o
 if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
 
-echo "[11/16] Assembling GDT flush & User Entry..."
+echo "[11/16] Assembling GDT flush, User Entry & Boot Entry..."
 nasm -f elf32 src/gdt_flush.asm -o gdt_flush.o
 nasm -f elf32 src/user_entry.asm -o user_entry.o
+nasm -f elf32 src/boot_entry.asm -o boot_entry.o
+
+
+echo "[12b/16] Compiling loader.c..."
+gcc $CFLAGS -c src/loader.c -o loader.o
+if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
 
 echo "[12/16] Compiling console.c..."
 gcc $CFLAGS -c src/console.c -o console.o
@@ -86,9 +92,10 @@ echo "[19/16] Compiling kernel.c..."
 gcc $CFLAGS -c kernel.c -o kernel.o
 if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
 
+
 echo "[20/16] Linking kernel..."
 ld -m elf_i386 -Ttext 0x10000 --oformat binary \
-   kernel.o string.o vga.o memory.o paging.o interrupt.o shell.o fs.o text.o console.o mouse.o ata.o math.o auth.o syscall.o gdt.o gdt_flush.o task.o user_entry.o\
+   boot_entry.o kernel.o string.o vga.o memory.o paging.o interrupt.o shell.o fs.o text.o console.o mouse.o ata.o math.o auth.o syscall.o gdt.o gdt_flush.o task.o user_entry.o loader.o\
    -o kernel.bin -nostdlib -e _start
 if [ $? -ne 0 ]; then
     echo "Error: Linking failed!"
@@ -104,7 +111,7 @@ echo "Kernel size: $KERNEL_SIZE bytes ($KERNEL_SECTORS sectors)"
 echo ""
 
 # Check if kernel is too large
-if [ $KERNEL_SECTORS -gt 200 ]; then
+if [ $KERNEL_SECTORS -gt 250 ]; then
     echo "WARNING: Kernel is very large ($KERNEL_SECTORS sectors)"
     echo "Consider increasing the filesystem start sector in fs.h"
 fi
@@ -112,6 +119,21 @@ fi
 echo "[21/16] Assembling bootloader..."
 nasm -f bin boot.asm -o boot.bin
 if [ $? -ne 0 ]; then echo "Error!"; exit 1; fi
+
+# --- NEW: Compile User Programs ---
+echo "[21a/16] Compiling user programs..."
+
+# Compile hello_user1.c -> hello1.bin
+gcc -m32 -fno-pie -fno-stack-protector -nostdlib -Iinclude -c userspace/hello_user_1.c -o hello_user1.o
+if [ $? -ne 0 ]; then echo "Error compiling hello_user_1.c"; exit 1; fi
+ld -m elf_i386 -T userspace/user.ld -o hello1.bin hello_user1.o
+if [ $? -ne 0 ]; then echo "Error linking hello1.bin"; exit 1; fi
+
+# Compile hello_user.c -> hello2.bin
+gcc -m32 -fno-pie -fno-stack-protector -nostdlib -Iinclude -c userspace/hello_user.c -o hello_user.o
+if [ $? -ne 0 ]; then echo "Error compiling hello_user.c"; exit 1; fi
+ld -m elf_i386 -T userspace/user.ld -o hello2.bin hello_user.o
+if [ $? -ne 0 ]; then echo "Error linking hello2.bin"; exit 1; fi
 
 echo "[22/16] Creating OS image..."
 

@@ -129,4 +129,10 @@ int paging_alloc_page(page_directory_t* dir, uint32_t virt, uint32_t flags);
  */
 void paging_free_page(page_directory_t* dir, uint32_t virt);
 
+/**
+ * @brief Checks if a virtual address range is mapped and has user access.
+ * @return 1 if user-accessible, 0 otherwise.
+ */
+int paging_is_user_range(page_directory_t* dir, uint32_t virt, uint32_t size);
+
 #endif // PAGING_H

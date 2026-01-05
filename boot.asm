@@ -34,7 +34,7 @@ start:
     ; Read kernel sectors
     ; Kernel is at sector 2 (sector 1 is bootloader, which is sector 0 in LBA)
     mov ah, 0x02        ; Read sectors
-    mov al, 60          ; Number of sectors (29KB fits in 60 sectors)
+    mov al, 127          ; Number of sectors (up to 63.5KB, fits in one segment)
     mov ch, 0           ; Cylinder 0
     mov cl, 2           ; Start from sector 2 (CHS sector numbering starts at 1)
     mov dh, 0           ; Head 0

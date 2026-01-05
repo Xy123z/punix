@@ -33,4 +33,17 @@ enter_user_mode:
     push 0x1B             ; CS (User Code: 0x18 | 3)
     push ebx              ; EIP (Target function address)
 
+    ; Clear all general purpose registers to prevent leakage
+    ; and avoid faults if the program starts with garbage/zeros
+    xor eax, eax
+    xor ecx, ecx
+    xor edx, edx
+    xor esi, esi
+    xor edi, edi
+    xor ebp, ebp
+    ; We keep ebx for a moment if we need it, but let's clear it too
+    ; except that the push ebx already happened.
+    ; Actually, we can clear ebx now since it's already on the stack.
+    xor ebx, ebx
+
     iret

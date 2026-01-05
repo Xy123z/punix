@@ -10,13 +10,13 @@
 #define SECTOR_SIZE         512
 
 // --- New Disk Layout ---
-#define FS_SUPERBLOCK_SECTOR    61
-#define FS_INODE_BITMAP_SECTOR  62
-#define FS_BLOCK_BITMAP_START   63
+#define FS_SUPERBLOCK_SECTOR    256
+#define FS_INODE_BITMAP_SECTOR  257
+#define FS_BLOCK_BITMAP_START   258
 #define FS_BLOCK_BITMAP_COUNT   25
-#define FS_INODE_TABLE_START    88
+#define FS_INODE_TABLE_START    283
 #define FS_INODE_TABLE_COUNT    64
-#define FS_DATA_BLOCKS_START    152
+#define FS_DATA_BLOCKS_START    347
 // -----------------------
 
 // --- Data Structures ---

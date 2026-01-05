@@ -350,3 +350,26 @@ void page_fault_handler(uint32_t error_code, uint32_t fault_addr) {
     console_print_colored("System halted.\n", COLOR_LIGHT_RED);
     while(1) __asm__ volatile("hlt");
 }
+
+int paging_is_user_range(page_directory_t* dir, uint32_t virt, uint32_t size) {
+    uint32_t current = virt & 0xFFFFF000;
+    uint32_t end = (virt + size + PAGE_SIZE - 1) & 0xFFFFF000;
+
+    while (current < end) {
+        uint32_t pd_idx = PAGE_DIR_INDEX(current);
+        uint32_t pt_idx = PAGE_TABLE_INDEX(current);
+
+        if (!(dir->entries[pd_idx] & PAGE_PRESENT) || !(dir->entries[pd_idx] & PAGE_USER)) {
+            return 0;
+        }
+
+        page_table_t* table = (page_table_t*)(dir->entries[pd_idx] & 0xFFFFF000);
+        if (!(table->entries[pt_idx] & PAGE_PRESENT) || !(table->entries[pt_idx] & PAGE_USER)) {
+            return 0;
+        }
+
+        current += PAGE_SIZE;
+    }
+
+    return 1;
+}

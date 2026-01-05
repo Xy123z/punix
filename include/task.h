@@ -24,6 +24,7 @@ typedef struct task {
     uint32_t gid;
     page_directory_t* page_directory;
     uint32_t kernel_stack;
+    uint32_t user_stack_top;
     registers_t regs;
     struct task* next;
 } task_t;
